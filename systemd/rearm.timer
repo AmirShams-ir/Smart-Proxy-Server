@@ -1,17 +1,12 @@
 [Unit]
-Description=Automatic Smart DNS Rearm
+Description=Automatic Smarty Proxy Rearm
 After=network-online.target
 Wants=network-online.target
 
 [Timer]
-# First automatic Rearm after boot.
-OnBootSec=5min
-
-# Periodic Rearm interval.
-# This value is synchronized from config/defaults.conf.
-OnUnitActiveSec=1h
-
-AccuracySec=1min
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=1s
 Unit=rearm.service
 
 [Install]
