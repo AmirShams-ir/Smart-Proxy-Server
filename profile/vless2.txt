@@ -1,0 +1,1 @@
+vless://b23f0274-a19d-4fed-a885-79b5288bf54e@172.67.153.97:443?encryption=none&security=tls&sni=Amir.irh.WoRKeRS.DEV&fp=chrome&alpn=http%2F1.1&insecure=0&allowInsecure=0&type=ws&host=amir.irh.workers.dev&path=%2FeyJqdW5rIjoieTcxTVRGN2VZS0xISiIsInByb3RvY29sIjoidmwiLCJtb2RlIjoicHJveHlpcCIsInBhbmVsSVBzIjpbXX0%3D%3Fed%3D2560#%F0%9F%92%A6%203%20-%20VLESS%20-%20IPv4%20%3A%20443

@@ -10,8 +10,8 @@ if ! command -v sing-box >/dev/null; then
   bash <(curl -fsSL https://sing-box.app/deb-install.sh)
 fi
 mkdir -p /etc/sing-box
-install -m 644 config.json /etc/sing-box/config.json
-install -m 644 sing-box.service /etc/systemd/system/sing-box.service
+install -m 644 /config/config.json /etc/sing-box/config.json
+install -m 644 /systemd/sing-box.service /etc/systemd/system/sing-box.service
 systemctl daemon-reload
 systemctl enable sing-box
 if sing-box check -c /etc/sing-box/config.json; then

@@ -1,0 +1,18 @@
+[Unit]
+Description=Automatic Smart DNS Rearm
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+# First automatic Rearm after boot.
+OnBootSec=5min
+
+# Periodic Rearm interval.
+# This value is synchronized from config/defaults.conf.
+OnUnitActiveSec=1h
+
+AccuracySec=1min
+Unit=rearm.service
+
+[Install]
+WantedBy=timers.target
