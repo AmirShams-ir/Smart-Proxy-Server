@@ -1,9 +1,8 @@
 [Unit]
-Description=Smart DNS Rearm
-After=network-online.target
+Description=Smarty Proxy Rearm
+After=network-online.target sing-box.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-# The installer writes the final ExecStart path for the actual project location.
-ExecStart=/bin/bash /root/Smart-DNS-Server/rearm.sh
+ExecStart=/bin/bash /opt/smart-proxy/lib/race.sh
