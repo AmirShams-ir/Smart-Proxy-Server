@@ -7,7 +7,7 @@ Wants=network-online.target
 OnBootSec=30s
 OnUnitActiveSec=15s
 AccuracySec=1s
-Unit=rearm.service
+Unit=smarty-proxy-rearm.service
 
 [Install]
 WantedBy=timers.target
