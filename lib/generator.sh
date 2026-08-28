@@ -70,33 +70,32 @@ elif transport == 'grpc':
         tr['service_name'] = service_name
     ob['transport'] = tr
 
+# sing-box 1.13+: listen address/port remain top-level Listen Fields.
+# Legacy inbound sniff fields were removed in 1.13, so protocol sniffing is
+# expressed as a route rule action.
 cfg = {
   "log": {
     "level": "info",
     "timestamp": True
   },
-
   "inbounds": [
     {
       "type": "socks",
       "tag": "socks-in",
-      "network": {
-        "listen": "0.0.0.0",
-        "listen_port": 1080
-      }
+      "listen": socks_listen,
+      "listen_port": int(socks_port)
     }
   ],
-
   "outbounds": [
     ob,
     {"type": "direct", "tag": "direct"},
     {"type": "block", "tag": "block"}
   ],
-
   "route": {
     "auto_detect_interface": True,
     "rules": [
       {
+        "inbound": ["socks-in"],
         "action": "sniff"
       }
     ],
