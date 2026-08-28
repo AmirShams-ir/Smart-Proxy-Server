@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$BASE_DIR/config/defaults.conf"
 
+[ $# -eq 1 ] || { echo "Usage: $0 <profile>" >&2; exit 2; }
 profile="$1"
 file="$PROFILE_DIR/$profile.txt"
 [ -f "$file" ] || file="$BASE_DIR/profile/$profile.txt"
@@ -27,6 +28,8 @@ def first(key, default=''):
 if not server:
     raise SystemExit('invalid profile: missing server')
 
+transport = first('type')
+
 if p.scheme == 'vless':
     ob = {"type": "vless", "tag": name, "server": server, "server_port": port, "uuid": user}
     if first('encryption') == 'none':
@@ -38,25 +41,21 @@ else:
 
 if first('security') == 'tls' or first('sni') or first('alpn'):
     tls = {"enabled": True}
-    tls["server_name"] = first("sni") or first("host") or server
+    tls["server_name"] = first('sni') or first('host') or server
 
-    alpn = first("alpn")
+    alpn = first('alpn')
     if alpn:
-        tls["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
-    elif transport == "ws":
-        # Smart default for Cloudflare WS
-        tls["alpn"] = ["h2", "http/1.1"]
+        tls['alpn'] = [x.strip() for x in alpn.split(',') if x.strip()]
+    elif transport == 'ws':
+        # Cloudflare-compatible default when a WS TLS URI omits ALPN.
+        tls['alpn'] = ['h2', 'http/1.1']
 
-    fp = first("fp")
+    fp = first('fp')
     if fp:
-        tls["utls"] = {
-            "enabled": True,
-            "fingerprint": fp
-        }
+        tls['utls'] = {"enabled": True, "fingerprint": fp}
 
-    ob["tls"] = tls
+    ob['tls'] = tls
 
-transport = first('type')
 if transport == 'ws':
     tr = {"type": "ws", "path": unquote(first('path', '/'))}
     host = first('host')
@@ -70,37 +69,36 @@ elif transport == 'grpc':
         tr['service_name'] = service_name
     ob['transport'] = tr
 
-# sing-box 1.13+: listen address/port remain top-level Listen Fields.
-# Legacy inbound sniff fields were removed in 1.13, so protocol sniffing is
-# expressed as a route rule action.
+# sing-box 1.13+: listen/listen_port remain top-level inbound fields.
+# Protocol sniffing is a route action; legacy inbound sniff fields were removed.
 cfg = {
-  "log": {
-    "level": "info",
-    "timestamp": True
-  },
-  "inbounds": [
-    {
-      "type": "socks",
-      "tag": "socks-in",
-      "listen": socks_listen,
-      "listen_port": int(socks_port)
-    }
-  ],
-  "outbounds": [
-    ob,
-    {"type": "direct", "tag": "direct"},
-    {"type": "block", "tag": "block"}
-  ],
-  "route": {
-    "auto_detect_interface": True,
-    "rules": [
-      {
-        "inbound": ["socks-in"],
-        "action": "sniff"
-      }
+    "log": {
+        "level": "info",
+        "timestamp": True
+    },
+    "inbounds": [
+        {
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": socks_listen,
+            "listen_port": int(socks_port)
+        }
     ],
-    "final": name
-  }
+    "outbounds": [
+        ob,
+        {"type": "direct", "tag": "direct"},
+        {"type": "block", "tag": "block"}
+    ],
+    "route": {
+        "auto_detect_interface": True,
+        "rules": [
+            {
+                "inbound": ["socks-in"],
+                "action": "sniff"
+            }
+        ],
+        "final": name
+    }
 }
 with open(out, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
