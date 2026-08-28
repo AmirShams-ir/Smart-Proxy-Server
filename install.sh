@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")"
 
 # shellcheck source=/dev/null
 source lib/common.sh
 
+# Keep the project VERSION immutable. /etc/os-release may define VERSION,
+# so OS detection uses a scoped source inside require_os().
 start_log
 banner
 require_root
 require_os
 
-info "Installing Smart Proxy Server v${VERSION}..."
+info "Installing ${PROJECT} v${VERSION}..."
 
 apt update
 apt install -y curl ca-certificates iputils-ping python3 jq
@@ -108,4 +110,4 @@ fi
 systemctl enable --now sing-box
 systemctl enable --now proxy-rearm.timer
 
-success "Smart Proxy Server v${VERSION} installation completed."
+success "${PROJECT} v${VERSION} installation completed."
