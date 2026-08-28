@@ -1,5 +1,5 @@
 [Unit]
-Description=Automatic Smarty Proxy Rearm
+Description=Automatic Smart Proxy Rearm
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 OnBootSec=30s
 OnUnitActiveSec=15s
 AccuracySec=1s
-Unit=smarty-proxy-rearm.service
+Unit=proxy-rearm.service
 
 [Install]
 WantedBy=timers.target
