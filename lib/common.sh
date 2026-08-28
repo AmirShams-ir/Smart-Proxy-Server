@@ -110,9 +110,9 @@ require_root() {
 ###############################################################################
 
 require_os() {
-
     [[ -f /etc/os-release ]] || fatal "Cannot detect operating system."
 
+    local ID PRETTY_NAME
     source /etc/os-release
 
     case "$ID" in
@@ -123,6 +123,8 @@ require_os() {
             fatal "Unsupported operating system."
         ;;
     esac
+
+    VERSION="2.0.2"
 }
 
 ###############################################################################
