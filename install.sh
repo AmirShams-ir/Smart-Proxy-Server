@@ -4,7 +4,8 @@ cd "$(dirname "$0")"
 # shellcheck source=/dev/null
 source lib/common.sh
 require_root
-info "Installing Smart Proxy Server v2.0.1..."
+info "Installing Smart Proxy Server v2.0.2..."
+
 apt update
 apt install -y curl ca-certificates iputils-ping python3 jq
 
@@ -12,27 +13,69 @@ if ! command -v sing-box >/dev/null 2>&1; then
   ARCH=$(dpkg --print-architecture)
 
   case "$ARCH" in
-    armhf)  PKG_ARCH="armv7" ;;
-    arm64)  PKG_ARCH="arm64" ;;
-    amd64)  PKG_ARCH="amd64" ;;
+    armhf)  RELEASE_ARCH="arm"; DEB_ARCH="armhf" ;;
+    arm64)  RELEASE_ARCH="arm64"; DEB_ARCH="arm64" ;;
+    amd64)  RELEASE_ARCH="amd64"; DEB_ARCH="amd64" ;;
     *)
-      error "Unsupported architecture: $ARCH"
+      error "Unsupported Debian architecture: $ARCH"
       ;;
   esac
 
   info "Installing sing-box for $ARCH..."
 
-  VERSION=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+  RELEASE_JSON=$(curl -fsSL --retry 3 --connect-timeout 15 \
+    https://api.github.com/repos/SagerNet/sing-box/releases/latest) \
+    || error "Unable to query latest sing-box release."
 
-  DEB="/tmp/sing-box.deb"
-  URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION#v}-linux-${PKG_ARCH}.deb"
+  VERSION=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty')
+  [ -n "$VERSION" ] || error "Unable to determine latest sing-box version."
 
-  curl -fL --retry 3 --connect-timeout 15 -o "$DEB" "$URL"
+  ASSET_URL=$(printf '%s' "$RELEASE_JSON" | jq -r --arg arch "$DEB_ARCH" '
+    .assets[]
+    | select(.name | endswith("_linux_" + $arch + ".deb"))
+    | .browser_download_url
+  ' | head -n1)
 
-  dpkg-deb --info "$DEB" >/dev/null 2>&1 || error "Downloaded sing-box package is corrupted."
+  if [ -z "$ASSET_URL" ]; then
+    # Fall back to the official tarball when no Debian package is published.
+    TARBALL_URL=$(printf '%s' "$RELEASE_JSON" | jq -r --arg arch "$RELEASE_ARCH" '
+      .assets[]
+      | select(.name == ("sing-box-" + (.tag_name // "") + "-linux-" + $arch + ".tar.gz"))
+      | .browser_download_url
+    ' | head -n1)
 
-  dpkg -i "$DEB"
-  rm -f "$DEB"
+    [ -n "$TARBALL_URL" ] || error "No sing-box asset found for $ARCH ($RELEASE_ARCH)."
+
+    TARBALL="/tmp/sing-box.tar.gz"
+    TMP_DIR="/tmp/sing-box-install"
+    rm -rf "$TMP_DIR" "$TARBALL"
+    mkdir -p "$TMP_DIR"
+
+    curl -fL --retry 3 --connect-timeout 15 -o "$TARBALL" "$TARBALL_URL" \
+      || error "Failed to download sing-box archive."
+    tar -tzf "$TARBALL" >/dev/null \
+      || error "Downloaded sing-box archive is corrupted."
+    tar -xzf "$TARBALL" -C "$TMP_DIR"
+
+    SING_BOX_BIN=$(find "$TMP_DIR" -type f -name sing-box -perm -u+x -print -quit)
+    [ -n "$SING_BOX_BIN" ] || error "sing-box binary not found in archive."
+
+    install -m 755 "$SING_BOX_BIN" /usr/local/bin/sing-box
+    rm -rf "$TMP_DIR" "$TARBALL"
+  else
+    DEB="/tmp/sing-box.deb"
+    rm -f "$DEB"
+
+    curl -fL --retry 3 --connect-timeout 15 -o "$DEB" "$ASSET_URL" \
+      || error "Failed to download sing-box Debian package."
+
+    dpkg-deb --info "$DEB" >/dev/null 2>&1 \
+      || error "Downloaded sing-box Debian package is corrupted."
+
+    dpkg -i "$DEB" \
+      || error "Failed to install sing-box Debian package."
+    rm -f "$DEB"
+  fi
 fi
 
 install -d -m 755 /opt/smart-proxy /etc/sing-box /etc/sing-box/profiles /var/log/smartproxy
@@ -59,4 +102,4 @@ fi
 
 systemctl enable --now sing-box
 systemctl enable --now proxy-rearm.timer
-info "Smart Proxy Server v2.0.1 installation completed."
+info "Smart Proxy Server v2.0.2 installation completed."
