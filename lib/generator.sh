@@ -38,12 +38,23 @@ else:
 
 if first('security') == 'tls' or first('sni') or first('alpn'):
     tls = {"enabled": True}
-    tls['server_name'] = first('sni') or first('host') or server
-    if first('alpn'):
-        tls['alpn'] = [x for x in first('alpn').split(',') if x]
-    if first('fp'):
-        tls['utls'] = {"enabled": True, "fingerprint": first('fp')}
-    ob['tls'] = tls
+    tls["server_name"] = first("sni") or first("host") or server
+
+    alpn = first("alpn")
+    if alpn:
+        tls["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
+    elif transport == "ws":
+        # Smart default for Cloudflare WS
+        tls["alpn"] = ["h2", "http/1.1"]
+
+    fp = first("fp")
+    if fp:
+        tls["utls"] = {
+            "enabled": True,
+            "fingerprint": fp
+        }
+
+    ob["tls"] = tls
 
 transport = first('type')
 if transport == 'ws':
