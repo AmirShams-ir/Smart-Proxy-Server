@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
 PROJECT="Smart Proxy Server"
-VERSION="1.0.0"
+VERSION="2.0.1"
 INSTALL_DIR="/opt/smart-proxy"
 CONFIG_DIR="/etc/sing-box"
+PROFILE_DIR="$CONFIG_DIR/profiles"
 LOG_DIR="/var/log/smartproxy"
 LOG_FILE="$LOG_DIR/install.log"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
