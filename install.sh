@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+
 # shellcheck source=/dev/null
 source lib/common.sh
+
+start_log
+banner
 require_root
-info "Installing Smart Proxy Server v2.0.2..."
+require_os
+
+info "Installing Smart Proxy Server v${VERSION}..."
 
 apt update
 apt install -y curl ca-certificates iputils-ping python3 jq
