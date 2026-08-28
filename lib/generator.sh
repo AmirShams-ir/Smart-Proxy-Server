@@ -60,16 +60,37 @@ elif transport == 'grpc':
     ob['transport'] = tr
 
 cfg = {
-    "log": {"level": "info", "timestamp": True},
-    "inbounds": [{
-        "type": "socks",
-        "tag": "socks-in",
-        "listen": socks_listen,
-        "listen_port": int(socks_port),
-        "sniff": True
-    }],
-    "outbounds": [ob, {"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}],
-    "route": {"auto_detect_interface": True, "final": name}
+  "log": {
+    "level": "info",
+    "timestamp": True
+  },
+
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "network": {
+        "listen": "0.0.0.0",
+        "listen_port": 1080
+      }
+    }
+  ],
+
+  "outbounds": [
+    ob,
+    {"type": "direct", "tag": "direct"},
+    {"type": "block", "tag": "block"}
+  ],
+
+  "route": {
+    "auto_detect_interface": True,
+    "rules": [
+      {
+        "action": "sniff"
+      }
+    ],
+    "final": name
+  }
 }
 with open(out, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
