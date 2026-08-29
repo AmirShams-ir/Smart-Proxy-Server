@@ -31,36 +31,59 @@ if not server:
 transport = first('type')
 
 if p.scheme == 'vless':
-    ob = {"type": "vless", "tag": name, "server": server, "server_port": port, "uuid": user, "packet_encoding": "xudp"}
-    if first('encryption') == 'none':
-        ob['packet_encoding'] = 'xudp'
+    ob = {
+        "type": "vless",
+        "tag": name,
+        "server": server,
+        "server_port": port,
+        "uuid": user,
+        "packet_encoding": "xudp"
+    }
 elif p.scheme == 'trojan':
-    ob = {"type": "trojan", "tag": name, "server": server, "server_port": port, "password": user, "packet_encoding": "xudp"}
+    ob = {
+        "type": "trojan",
+        "tag": name,
+        "server": server,
+        "server_port": port,
+        "password": user
+    }
 else:
     raise SystemExit(f'unsupported scheme: {p.scheme}')
 
 if first('security') == 'tls' or first('sni') or first('alpn'):
-    tls = {"enabled": True}
-    tls["server_name"] = first('sni') or first('host') or server
+    tls = {
+        "enabled": True,
+        "server_name": first('sni') or first('host') or server,
+        "insecure": first('insecure', '0').lower() in ('1', 'true', 'yes')
+    }
 
     alpn = first('alpn')
     if alpn:
         tls['alpn'] = [x.strip() for x in alpn.split(',') if x.strip()]
     elif transport == 'ws':
         # Cloudflare-compatible default when a WS TLS URI omits ALPN.
-        tls['alpn'] = ['h2', 'http/1.1']
+        tls['alpn'] = ['http/1.1']
 
     fp = first('fp')
     if fp:
-        tls['utls'] = {"enabled": True, "fingerprint": fp}
+        tls['utls'] = {
+            "enabled": True,
+            "fingerprint": fp
+        }
 
     ob['tls'] = tls
 
 if transport == 'ws':
-    tr = {"type": "ws", "path": unquote(first('path', '/'))}
+    tr = {
+        "type": "ws",
+        "path": unquote(first('path', '/'))
+    }
     host = first('host')
     if host:
         tr['headers'] = {"Host": host}
+    if first('ed'):
+        tr['max_early_data'] = int(first('ed'))
+        tr['early_data_header_name'] = first('ehn', 'Sec-WebSocket-Protocol')
     ob['transport'] = tr
 elif transport == 'grpc':
     tr = {"type": "grpc"}
@@ -69,8 +92,6 @@ elif transport == 'grpc':
         tr['service_name'] = service_name
     ob['transport'] = tr
 
-# sing-box 1.13+: listen/listen_port remain top-level inbound fields.
-# Protocol sniffing is a route action; legacy inbound sniff fields were removed.
 cfg = {
     "log": {
         "level": "info",
