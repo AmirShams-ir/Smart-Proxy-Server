@@ -1,1 +1,1 @@
-trojan://2d556f14-54f5-a3ab-d6f5-943402393af7@amir.irf.workers.dev:443?security=tls&sni=amir.irf.workers.dev&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=amir.irf.workers.dev&path=%2FeyJqdW5rIjoiaUVMTUJkdFRIT2UiLCJwcm90b2NvbCI6InRyIiwibW9kZSI6InByb3h5aXAiLCJwYW5lbElQcyI6W10sInJlbGF5SWR4IjowfQ%3D%3D#T-Core-443-Amir
+vless://73924fb9-76bf-4467-b4a0-9f4f61d57520@172.66.2.101:8443?encryption=none&security=tls&sni=amir.irv.workers.dev&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=amir.irv.workers.dev&path=%2F#Nova-8nyp7a
