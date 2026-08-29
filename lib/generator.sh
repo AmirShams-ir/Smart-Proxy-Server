@@ -31,11 +31,11 @@ if not server:
 transport = first('type')
 
 if p.scheme == 'vless':
-    ob = {"type": "vless", "tag": name, "server": server, "server_port": port, "uuid": user}
+    ob = {"type": "vless", "tag": name, "server": server, "server_port": port, "uuid": user, "packet_encoding": "xudp"}
     if first('encryption') == 'none':
         ob['packet_encoding'] = 'xudp'
 elif p.scheme == 'trojan':
-    ob = {"type": "trojan", "tag": name, "server": server, "server_port": port, "password": user}
+    ob = {"type": "trojan", "tag": name, "server": server, "server_port": port, "password": user, "packet_encoding": "xudp"}
 else:
     raise SystemExit(f'unsupported scheme: {p.scheme}')
 
