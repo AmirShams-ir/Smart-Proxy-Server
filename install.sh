@@ -85,19 +85,40 @@ if ! command -v sing-box >/dev/null 2>&1; then
   fi
 fi
 
-install -d -m 755 /opt/smart-proxy /etc/sing-box /etc/sing-box/profiles /var/log/smartproxy
+install -d -m 755 \
+  /opt/smart-proxy \
+  /etc/sing-box \
+  /etc/sing-box/profiles \
+  /var/log/smartproxy
+
+rm -rf /opt/smart-proxy
 cp -a . /opt/smart-proxy
+
 install -m 644 config/defaults.conf /etc/sing-box/defaults.conf
 install -m 644 config/state.json /etc/sing-box/proxy-state.json
-cp -a profile/. /etc/sing-box/profiles/
+
+# Keep runtime profiles identical to repository
+rm -f /etc/sing-box/profiles/*.txt
+cp -f profile/*.txt /etc/sing-box/profiles/
+chmod 600 /etc/sing-box/profiles/*.txt
+
 install -m 755 lib/*.sh /opt/smart-proxy/lib/
-install -m 644 systemd/sing-box.service /etc/systemd/system/sing-box.service
-install -m 644 systemd/rearm.service /etc/systemd/system/proxy-rearm.service
-install -m 644 systemd/rearm.timer /etc/systemd/system/proxy-rearm.timer
+
+install -m 644 systemd/sing-box.service \
+  /etc/systemd/system/sing-box.service
+install -m 644 systemd/rearm.service \
+  /etc/systemd/system/proxy-rearm.service
+install -m 644 systemd/rearm.timer \
+  /etc/systemd/system/proxy-rearm.timer
+
 ln -sf /etc/sing-box/defaults.conf /opt/smart-proxy/config/defaults.conf
 ln -sf /etc/sing-box/proxy-state.json /opt/smart-proxy/config/state.json
 
+rm -f /etc/sing-box/config.json
+
+systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
+
 if /opt/smart-proxy/lib/race.sh; then
   if ! sing-box check -c /etc/sing-box/config.json; then
     fatal "Generated sing-box configuration is invalid."

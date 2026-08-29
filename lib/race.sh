@@ -31,7 +31,9 @@ PY
 
 best_name=""; best_score=-1
 shopt -s nullglob
-for file in "$PROFILE_ROOT"/*.txt; do
+mapfile -t profiles < <(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | sort)
+
+for file in "${profiles[@]}"; do
   name="$(basename "$file" .txt)"
   health="$($BASE_DIR/lib/health.sh "$file" 2>/dev/null || true)"
   [[ -n "$health" ]] || { log "$name health=error"; continue; }
@@ -44,9 +46,14 @@ done
 shopt -u nullglob
 
 if [[ "$MODE" == "manual" ]]; then
-  [[ -n "$ACTIVE_PROFILE" ]] || { log "manual mode requires ACTIVE_PROFILE"; exit 1; }
-  [[ -f "$PROFILE_ROOT/$ACTIVE_PROFILE.txt" ]] || { log "manual profile not found: $ACTIVE_PROFILE"; exit 1; }
-  best_name="$ACTIVE_PROFILE"
+  manual_file="$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | head -n1)"
+
+  [[ -n "$manual_file" ]] || {
+      log "manual mode: no profile found"
+      exit 1
+  }
+
+  best_name="$(basename "$manual_file" .txt)"
   log "manual mode active=$best_name"
 fi
 
@@ -81,4 +88,4 @@ else
     log "activate $best_name score=$best_score"
   fi
 fi
-printf '%s %s\n' "$best_name" "$best_score"
+printf '[ACTIVE] %s  score=%s\n' "$best_name" "$best_score"
