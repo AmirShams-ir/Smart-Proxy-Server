@@ -9,6 +9,8 @@ PROFILE_ROOT="$PROFILE_DIR"
 if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit)" ]]; then
   if [[ -d "$BASE_DIR/profiles" ]]; then
     PROFILE_ROOT="$BASE_DIR/profiles"
+  elif [[ -d "$BASE_DIR/profile" ]]; then
+    PROFILE_ROOT="$BASE_DIR/profile"
   fi
 fi
 
@@ -50,11 +52,27 @@ for file in "${profiles[@]}"; do
   awk -v j="$jitter" 'BEGIN{exit !(j+0>=0)}' 2>/dev/null || jitter=999999
   awk -v s="$success" 'BEGIN{exit !(s+0>=0)}' 2>/dev/null || success=-1
   log "$name $health $scored"
-  if (( score > best_score )) || \
-     (( score == best_score && success > best_success )) || \
-     (( score == best_score && success == best_success && rtt+0 < best_rtt+0 )) || \
-     (( score == best_score && success == best_success && rtt+0 == best_rtt+0 && jitter+0 < best_jitter+0 )); then
-    best_score=$score; best_name=$name; best_rtt=$rtt; best_jitter=$jitter; best_success=$success
+
+  is_better="$(awk -v s="$score" -v bs="$best_score" \
+      -v suc="$success" -v bsuc="$best_success" \
+      -v r="$rtt" -v br="$best_rtt" \
+      -v j="$jitter" -v bj="$best_jitter" 'BEGIN {
+        if (s > bs) { print 1; exit }
+        if (s < bs) { print 0; exit }
+        if (suc > bsuc) { print 1; exit }
+        if (suc < bsuc) { print 0; exit }
+        if (r < br) { print 1; exit }
+        if (r > br) { print 0; exit }
+        if (j < bj) { print 1; exit }
+        print 0
+      }')"
+
+  if [[ "$is_better" == "1" ]]; then
+    best_score=$score
+    best_name=$name
+    best_rtt=$rtt
+    best_jitter=$jitter
+    best_success=$success
   fi
 done
 shopt -u nullglob
