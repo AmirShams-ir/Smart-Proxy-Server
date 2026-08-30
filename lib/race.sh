@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=/dev/null
 source "$BASE_DIR/config/defaults.conf"
 mkdir -p "$LOG_DIR"
 STATE="$STATE_FILE"
 [[ -f "$STATE" ]] || printf '{"active":"","last_switch":0,"profiles":{}}\n' > "$STATE"
 PROFILE_ROOT="$PROFILE_DIR"
-[[ -d "$PROFILE_ROOT" ]] || PROFILE_ROOT="$BASE_DIR/profile"
+if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit)" ]]; then
+  if [[ -d "$BASE_DIR/profiles" ]]; then
+    PROFILE_ROOT="$BASE_DIR/profiles"
+  elif [[ -d "$BASE_DIR/profile" ]]; then
+    PROFILE_ROOT="$BASE_DIR/profile"
+  fi
+fi
 
 log(){ printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"; }
 set_state(){ python3 - "$STATE" "$1" "$2" <<'PY'
@@ -47,17 +52,12 @@ shopt -u nullglob
 
 if [[ "$MODE" == "manual" ]]; then
   manual_file="$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | head -n1)"
-
-  [[ -n "$manual_file" ]] || {
-      log "manual mode: no profile found"
-      exit 1
-  }
-
+  [[ -n "$manual_file" ]] || { log "manual mode: no profile found"; exit 1; }
   best_name="$(basename "$manual_file" .txt)"
   log "manual mode active=$best_name"
 fi
 
-[[ -n "$best_name" ]] || { log "no usable profiles"; exit 1; }
+[[ -n "$best_name" ]] || { log "no usable profiles in $PROFILE_ROOT"; exit 1; }
 read -r current last_switch < <(get_state)
 if [[ "$MODE" != "manual" && -n "$current" && "$current" != "$best_name" ]]; then
   current_file="$PROFILE_ROOT/$current.txt"
