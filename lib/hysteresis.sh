@@ -8,7 +8,7 @@ source "$BASE_DIR/config/defaults.conf"
 # for direct development runs before installation.
 PROFILE_ROOT="$PROFILE_DIR"
 if [[ ! -d "$PROFILE_ROOT" ]]; then
-  PROFILE_ROOT="$BASE_DIR/profile"
+  PROFILE_ROOT="$BASE_DIR/profiles"
 fi
 
 current="${1:-}"; candidate="${2:-}"; now="${3:-$(date +%s)}"; last_switch="${4:-0}"

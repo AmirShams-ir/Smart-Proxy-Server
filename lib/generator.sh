@@ -7,7 +7,7 @@ source "$BASE_DIR/config/defaults.conf"
 [ $# -eq 1 ] || { echo "Usage: $0 <profile>" >&2; exit 2; }
 profile="$1"
 file="$PROFILE_DIR/$profile.txt"
-[ -f "$file" ] || file="$BASE_DIR/profile/$profile.txt"
+[ -f "$file" ] || file="$BASE_DIR/profiles/$profile.txt"
 [ -f "$file" ] || { echo "profile not found: $profile" >&2; exit 2; }
 uri="$(head -n1 "$file" | tr -d '\r')"
 python3 - "$uri" "$CONFIG_FILE" "$profile" "$SOCKS_LISTEN" "$SOCKS_PORT" <<'PY'

@@ -99,7 +99,7 @@ install -m 644 config/state.json /etc/sing-box/proxy-state.json
 
 # Keep runtime profiles identical to repository
 rm -f /etc/sing-box/profiles/*.txt
-cp -f profile/*.txt /etc/sing-box/profiles/
+cp -f profiles/*.txt /etc/sing-box/profiles/
 chmod 600 /etc/sing-box/profiles/*.txt
 
 install -m 755 lib/*.sh /opt/smart-proxy/lib/
@@ -124,8 +124,8 @@ if /opt/smart-proxy/lib/race.sh; then
     fatal "Generated sing-box configuration is invalid."
   fi
 else
-  warning "No usable profile was selected during install."
-  fatal "At least one valid profile is required for initial installation."
+  warning "No usable profiles was selected during install."
+  fatal "At least one valid profiles is required for initial installation."
 fi
 
 systemctl enable --now sing-box

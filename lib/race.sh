@@ -9,8 +9,8 @@ PROFILE_ROOT="$PROFILE_DIR"
 if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit)" ]]; then
   if [[ -d "$BASE_DIR/profiles" ]]; then
     PROFILE_ROOT="$BASE_DIR/profiles"
-  elif [[ -d "$BASE_DIR/profile" ]]; then
-    PROFILE_ROOT="$BASE_DIR/profile"
+  elif [[ -d "$BASE_DIR/profiles" ]]; then
+    PROFILE_ROOT="$BASE_DIR/profiles"
   fi
 fi
 
