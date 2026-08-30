@@ -1,1 +1,0 @@
-vless://73924fb9-76bf-4467-b4a0-9f4f61d57520@172.66.2.101:8443?encryption=none&security=tls&sni=amir.irv.workers.dev&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=amir.irv.workers.dev&path=%2F#Nova-8nyp7a

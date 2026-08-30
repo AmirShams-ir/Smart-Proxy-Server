@@ -1,0 +1,1 @@
+trojan://b23f0274-a19d-4fed-a885-79b5288bf54e@amir.irh.workers.dev:80?security=none&sni=Amir.IrH.WorkeRs.dEV&fp=chrome&type=ws&host=amir.irh.workers.dev&path=/eyJqdW5rIjoiaWtDalgxVFFFbHk5VlB0ZyIsInByb3RvY29sIjoidmwiLCJtb2RlIjoicHJveHlpcCIsInBhbmVsSVBzIjpbXX0=?ed=2560#BPB

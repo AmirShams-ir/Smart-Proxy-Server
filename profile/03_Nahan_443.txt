@@ -1,0 +1,1 @@
+vless://2d556f14-54f5-a3ab-d6f5-943400000000@amir.irf.workers.dev:443?encryption=none&security=tls&sni=amir.irf.workers.dev&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=amir.irf.workers.dev&path=%2Fsync#Nahan

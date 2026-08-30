@@ -1,0 +1,1 @@
+vless://b23f0274-a19d-4fed-a885-79b5288bf54e@amir.irh.workers.dev:80?encryption=none&security=none&sni=Amir.IrH.WorkeRs.dEV&fp=chrome&type=ws&host=amir.irh.workers.dev&path=%2FeyJqdW5rIjoiaWtDalgxVFFFbHk5VlB0ZyIsInByb3RvY29sIjoidmwiLCJtb2RlIjoicHJveHlpcCIsInBhbmVsSVBzIjpbXX0%3D%3Fed%3D2560#BPB

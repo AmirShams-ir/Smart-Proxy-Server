@@ -1,0 +1,1 @@
+trojan://2d556f14-54f5-a3ab-d6f5-943400000001@amir.irf.workers.dev:80?security=none&sni=amir.irf.workers.dev&fp=chrome&type=ws&host=amir.irf.workers.dev&path=/sync#Nahan

@@ -1,0 +1,1 @@
+trojan://73924fb9-76bf-4467-b4a0-9f4f61d57520@amir.irv.workers.dev:443?security=tls&sni=amir.irv.workers.dev&fp=chrome&type=ws&host=amir.irv.workers.dev&path=/#Nova
