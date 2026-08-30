@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=/dev/null
 source "$BASE_DIR/config/defaults.conf"
 mkdir -p "$LOG_DIR"
 STATE="$STATE_FILE"
 [[ -f "$STATE" ]] || printf '{"active":"","last_switch":0,"profiles":{}}\n' > "$STATE"
 PROFILE_ROOT="$PROFILE_DIR"
-[[ -d "$PROFILE_ROOT" ]] || PROFILE_ROOT="$BASE_DIR/profile"
+if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit)" ]]; then
+  if [[ -d "$BASE_DIR/profiles" ]]; then
+    PROFILE_ROOT="$BASE_DIR/profiles"
+  fi
+fi
 
 log(){ printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"; }
 set_state(){ python3 - "$STATE" "$1" "$2" <<'PY'
@@ -29,7 +32,7 @@ except Exception:
 PY
 }
 
-best_name=""; best_score=-1
+best_name=""; best_score=-1; best_rtt=999999; best_jitter=999999; best_success=-1
 shopt -s nullglob
 mapfile -t profiles < <(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | sort)
 
@@ -39,25 +42,31 @@ for file in "${profiles[@]}"; do
   [[ -n "$health" ]] || { log "$name health=error"; continue; }
   scored="$(printf '%s\n' "$health" | "$BASE_DIR/lib/score.sh")"
   score="$(printf '%s\n' "$scored" | sed -n 's/.*score=\([0-9]*\).*/\1/p')"
+  rtt="$(printf '%s\n' "$health" | sed -n 's/.* rtt=\([^ ]*\).*/\1/p')"
+  jitter="$(printf '%s\n' "$health" | sed -n 's/.* jitter=\([^ ]*\).*/\1/p')"
+  success="$(printf '%s\n' "$health" | sed -n 's/.* success=\([^ ]*\).*/\1/p')"
   [[ "$score" =~ ^[0-9]+$ ]] || { log "$name score=invalid"; continue; }
+  awk -v r="$rtt" 'BEGIN{exit !(r+0>=0)}' 2>/dev/null || rtt=999999
+  awk -v j="$jitter" 'BEGIN{exit !(j+0>=0)}' 2>/dev/null || jitter=999999
+  awk -v s="$success" 'BEGIN{exit !(s+0>=0)}' 2>/dev/null || success=-1
   log "$name $health $scored"
-  if (( score > best_score )); then best_score=$score; best_name=$name; fi
+  if (( score > best_score )) || \
+     (( score == best_score && success > best_success )) || \
+     (( score == best_score && success == best_success && rtt+0 < best_rtt+0 )) || \
+     (( score == best_score && success == best_success && rtt+0 == best_rtt+0 && jitter+0 < best_jitter+0 )); then
+    best_score=$score; best_name=$name; best_rtt=$rtt; best_jitter=$jitter; best_success=$success
+  fi
 done
 shopt -u nullglob
 
 if [[ "$MODE" == "manual" ]]; then
-  manual_file="$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | head -n1)"
-
-  [[ -n "$manual_file" ]] || {
-      log "manual mode: no profile found"
-      exit 1
-  }
-
+  manual_file="$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | sort | head -n1)"
+  [[ -n "$manual_file" ]] || { log "manual mode: no profile found"; exit 1; }
   best_name="$(basename "$manual_file" .txt)"
   log "manual mode active=$best_name"
 fi
 
-[[ -n "$best_name" ]] || { log "no usable profiles"; exit 1; }
+[[ -n "$best_name" ]] || { log "no usable profiles in $PROFILE_ROOT"; exit 1; }
 read -r current last_switch < <(get_state)
 if [[ "$MODE" != "manual" && -n "$current" && "$current" != "$best_name" ]]; then
   current_file="$PROFILE_ROOT/$current.txt"
