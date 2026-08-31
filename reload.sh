@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 set -Eeuo pipefail
 
 ###############################################################################
@@ -52,7 +51,6 @@ errors=0
 
 for file in "${profiles[@]}"; do
     name="$(basename "$file" .txt)"
-    health_err=""
     health=""
 
     if health="$(${BASE_DIR}/lib/health.sh "$file" 2>&1)"; then
@@ -71,7 +69,13 @@ for file in "${profiles[@]}"; do
         continue
     fi
 
-    scored="$(printf '%s\n' "$health" | "${BASE_DIR}/lib/score.sh")"
+    if ! scored="$(printf '%s\n' "$health" | "${BASE_DIR}/lib/score.sh")"; then
+        printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
+        printf '[ERROR] %s: score.sh failed: %s\n' "$name" "$health" >&2
+        ((errors+=1))
+        continue
+    fi
+
     score="$(printf '%s\n' "$scored" | sed -n 's/.*score=\([^ ]*\).*/\1/p')"
     host="$(printf '%s\n' "$health" | sed -n 's/.*host=\([^ ]*\).*/\1/p')"
     rtt="$(printf '%s\n' "$health" | sed -n 's/.* rtt=\([^ ]*\).*/\1/p')"
@@ -87,7 +91,7 @@ for file in "${profiles[@]}"; do
     [[ "$success_rate" =~ ^[0-9]+([.][0-9]+)?$ ]] || success_rate=0
 
     printf '%s\n' "$name|$host|$rtt|$jitter|$loss|$success_rate|$score" >> "$RESULT_FILE"
-    ((usable+=1))
+    usable=$((usable + 1))
 
     if awk -v s="$score" -v bs="$best_score" -v suc="$success_rate" -v bsuc="$best_success" -v r="$rtt" -v br="$best_rtt" -v j="$jitter" -v bj="$best_jitter" -v n="$name" -v bn="$best_name" 'BEGIN {
         if (s > bs) exit 0
@@ -107,13 +111,12 @@ for file in "${profiles[@]}"; do
         best_rtt="$rtt"
         best_jitter="$jitter"
     fi
-
 done
 
 printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
 if (( usable == 0 )); then
-    fatal "No usable proxy profile found. Check: bash -x lib/health.sh <profile>"
+    fatal "No usable proxy profile found. Check: bash -x lib/health.sh <profile-file>"
 fi
 
 printf '\n'
@@ -147,10 +150,10 @@ RACE_RESULT_FILE="$RESULT_FILE" "${BASE_DIR}/lib/race.sh"
 active=""
 if [[ -f "$STATE_FILE" ]]; then
     active="$(python3 - "$STATE_FILE" <<'PY'
-import json,sys
+import json, sys
 try:
-    with open(sys.argv[1],encoding='utf-8') as f:
-        print(json.load(f).get('active',''))
+    with open(sys.argv[1], encoding='utf-8') as f:
+        print(json.load(f).get('active', ''))
 except Exception:
     print('')
 PY
@@ -158,7 +161,7 @@ PY
 fi
 
 if [[ -n "$active" ]]; then
-    active_score="$(awk -F'|' -v n="$active" '$1==n {print $7; exit}' "$RESULT_FILE")"
+    active_score="$(awk -F'|' -v n="$active" '$1 == n {print $7; exit}' "$RESULT_FILE")"
     [[ -n "$active_score" ]] || active_score="unknown"
     echo
 echo "Active Profile"
@@ -167,7 +170,7 @@ printf 'Score   : %s/100\n' "$active_score"
 fi
 
 if (( errors > 0 )); then
-    warning "${usable} profiles usable, ${errors} profiles failed health checks."
+    warning "${usable} profiles usable, ${errors} profiles failed health/scoring checks."
 fi
 
 echo
