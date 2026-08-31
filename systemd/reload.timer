@@ -7,7 +7,7 @@ Wants=network-online.target
 OnBootSec=30s
 OnUnitActiveSec=1h
 AccuracySec=1s
-Unit=reload.service
+Unit=smart-proxy-reload.service
 
 [Install]
 WantedBy=timers.target
