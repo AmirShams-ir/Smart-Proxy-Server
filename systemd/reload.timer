@@ -4,8 +4,6 @@ After=network-online.target
 Wants=network-online.target
 
 [Timer]
-# The production timer is rendered from config/defaults.conf by install.sh.
-# This repository template intentionally does not hard-code a polling interval.
 OnBootSec=30s
 AccuracySec=1s
 Unit=reload.service
