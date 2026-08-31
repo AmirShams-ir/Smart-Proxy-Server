@@ -1,5 +1,5 @@
 [Unit]
-Description=Smart Proxy Rearm
+Description=Smart Proxy Reload
 After=network-online.target sing-box.service
 Wants=network-online.target
 
