@@ -1,0 +1,8 @@
+[Unit]
+Description=Smart Proxy Reload
+After=network-online.target sing-box.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/smart-proxy/lib/race.sh
