@@ -36,18 +36,17 @@ elif p.scheme == 'trojan':
 else:
     raise SystemExit(f'unsupported scheme: {p.scheme}')
 
-# TLS policy: derive TLS from the endpoint port.
-# Plain HTTP-style ports use cleartext; common TLS ports use TLS.
-# Explicit nonstandard TLS/cleartext can still be expressed via security=
-# tls/none, but the endpoint port takes precedence for the standard profiles.
-plain_ports = {80, 8080}
-tls_ports = {443, 8443}
+# Cloudflare proxied HTTP/HTTPS ports.
+# HTTP ports are cleartext; HTTPS ports use TLS.
+http_ports = {80, 8080, 8880, 2052, 2082, 2086, 2095}
+https_ports = {443, 2053, 2083, 2087, 2096, 8443}
 
-if port in plain_ports:
+if port in http_ports:
     tls_enabled = False
-elif port in tls_ports:
+elif port in https_ports:
     tls_enabled = True
 elif security == 'tls':
+    # Preserve explicit TLS for non-Cloudflare/non-standard ports.
     tls_enabled = True
 elif security in ('none', ''):
     tls_enabled = False
@@ -55,44 +54,44 @@ else:
     tls_enabled = False
 
 if tls_enabled:
-    tls={
-        "enabled":True,
-        "server_name":first('sni') or first('host') or server,
-        "insecure":first('insecure','0').lower() in ('1','true','yes')
+    tls = {
+        "enabled": True,
+        "server_name": first('sni') or first('host') or server,
+        "insecure": first('insecure', '0').lower() in ('1', 'true', 'yes')
     }
-    alpn=first('alpn')
+    alpn = first('alpn')
     if alpn:
-        tls['alpn']=[x.strip() for x in alpn.split(',') if x.strip()]
-    elif transport=='ws':
-        tls['alpn']=['http/1.1']
-    fp=first('fp')
+        tls['alpn'] = [x.strip() for x in alpn.split(',') if x.strip()]
+    elif transport == 'ws':
+        tls['alpn'] = ['http/1.1']
+    fp = first('fp')
     if fp:
-        tls['utls']={"enabled":True,"fingerprint":fp}
-    ob['tls']=tls
+        tls['utls'] = {"enabled": True, "fingerprint": fp}
+    ob['tls'] = tls
 
-if transport=='ws':
-    tr={"type":"ws","path":unquote(first('path','/'))}
-    host=first('host')
+if transport == 'ws':
+    tr = {"type": "ws", "path": unquote(first('path', '/'))}
+    host = first('host')
     if host:
-        tr['headers']={"Host":host}
+        tr['headers'] = {"Host": host}
     if first('ed'):
-        tr['max_early_data']=int(first('ed'))
-        tr['early_data_header_name']=first('ehn','Sec-WebSocket-Protocol')
-    ob['transport']=tr
-elif transport=='grpc':
-    tr={"type":"grpc"}
-    service_name=first('serviceName')
+        tr['max_early_data'] = int(first('ed'))
+        tr['early_data_header_name'] = first('ehn', 'Sec-WebSocket-Protocol')
+    ob['transport'] = tr
+elif transport == 'grpc':
+    tr = {"type": "grpc"}
+    service_name = first('serviceName')
     if service_name:
-        tr['service_name']=service_name
-    ob['transport']=tr
+        tr['service_name'] = service_name
+    ob['transport'] = tr
 
-cfg={
-    "log":{"level":"info","timestamp":True},
-    "inbounds":[{"type":"socks","tag":"socks-in","listen":socks_listen,"listen_port":int(socks_port)}],
-    "outbounds":[ob,{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],
-    "route":{"auto_detect_interface":True,"rules":[{"inbound":["socks-in"],"action":"sniff"}],"final":name}
+cfg = {
+    "log": {"level": "info", "timestamp": True},
+    "inbounds": [{"type": "socks", "tag": "socks-in", "listen": socks_listen, "listen_port": int(socks_port)}],
+    "outbounds": [ob, {"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}],
+    "route": {"auto_detect_interface": True, "rules": [{"inbound": ["socks-in"], "action": "sniff"}], "final": name}
 }
-with open(out,'w',encoding='utf-8') as f:
-    json.dump(cfg,f,indent=2,ensure_ascii=False)
+with open(out, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
 PY
 chmod 600 "$CONFIG_FILE"
