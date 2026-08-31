@@ -5,4 +5,4 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash /opt/smart-proxy/lib/race.sh
+ExecStart=/bin/bash /opt/smart-proxy/reload.sh

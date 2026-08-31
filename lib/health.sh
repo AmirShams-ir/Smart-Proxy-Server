@@ -20,9 +20,8 @@ port="$(printf '%s\n' "$uri" | sed -nE 's#^[a-z]+://[^@]+@[^:/?#]+:([0-9]+).*#\1
 [ -n "$host" ] || { echo "invalid profile host" >&2; exit 3; }
 port="${port:-443}"
 
-# Lightweight endpoint reachability metrics used for ranking.
 raw="$(ping -n -c "$PING_COUNT" -W "$TIMEOUT" "$host" 2>/dev/null || true)"
-loss="$(printf '%s\n' "$raw" | sed -nE 's/.*, ([0-9]+)% packet loss.*/\1/p' | tail -n1)"
+loss="$(printf '%s\n' "$raw" | sed -nE 's/.*[, ]([0-9]+)% packet loss.*/\1/p' | tail -n1)"
 rtt_avg="$(printf '%s\n' "$raw" | sed -nE 's/.* = [0-9.]+\/([0-9.]+)\/.* ms/\1/p' | tail -n1)"
 
 # TCP connect timing fallback when ICMP is unavailable.
@@ -35,7 +34,13 @@ if command -v timeout >/dev/null 2>&1; then
 fi
 
 [ -n "${loss:-}" ] || loss=100
-if [ -n "${rtt_avg:-}" ]; then rtt_ms="$rtt_avg"; elif [ -n "$tcp_ms" ]; then rtt_ms="$tcp_ms"; else rtt_ms=9999; fi
+if [ -n "${rtt_avg:-}" ]; then
+  rtt_ms="$rtt_avg"
+elif [ -n "$tcp_ms" ]; then
+  rtt_ms="$tcp_ms"
+else
+  rtt_ms=9999
+fi
 
 jitter_ms=0
 samples="$(printf '%s\n' "$raw" | grep -oE 'time[=<][0-9.]+ ms' | sed -E 's/time[=<]//' || true)"
@@ -45,5 +50,11 @@ if [ "$(printf '%s\n' "$samples" | sed '/^$/d' | wc -l)" -ge 2 ]; then
   jitter_ms=$((max-min))
 fi
 
+# Success is derived strictly from packet loss. A 0% loss result therefore
+# always reports 100% success, independent of the RTT/timing fallback.
 success=$((100-loss))
-printf 'host=%s port=%s rtt=%s jitter=%s loss=%s success=%s\n' "$host" "$port" "$rtt_ms" "$jitter_ms" "$loss" "$success"
+(( success < 0 )) && success=0
+(( success > 100 )) && success=100
+
+printf 'host=%s port=%s rtt=%s jitter=%s loss=%s success=%s\n' \
+  "$host" "$port" "$rtt_ms" "$jitter_ms" "$loss" "$success"
