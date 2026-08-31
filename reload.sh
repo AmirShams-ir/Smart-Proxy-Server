@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+chmod +x lib/health.sh
+chmod +x lib/score.sh
+
 ###############################################################################
 # Smart Proxy Server - Reload / Race Report
 ###############################################################################
