@@ -7,7 +7,7 @@ Wants=network-online.target
 OnBootSec=30s
 OnUnitActiveSec=15s
 AccuracySec=1s
-Unit=proxy-rearm.service
+Unit=reload.service
 
 [Install]
 WantedBy=timers.target

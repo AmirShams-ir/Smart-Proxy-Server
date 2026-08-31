@@ -106,10 +106,10 @@ install -m 755 lib/*.sh /opt/smart-proxy/lib/
 
 install -m 644 systemd/sing-box.service \
   /etc/systemd/system/sing-box.service
-install -m 644 systemd/rearm.service \
-  /etc/systemd/system/proxy-rearm.service
-install -m 644 systemd/rearm.timer \
-  /etc/systemd/system/proxy-rearm.timer
+install -m 644 systemd/reload.service \
+  /etc/systemd/system/reload.service
+install -m 644 systemd/reload.timer \
+  /etc/systemd/system/reload.timer
 
 ln -sf /etc/sing-box/defaults.conf /opt/smart-proxy/config/defaults.conf
 ln -sf /etc/sing-box/proxy-state.json /opt/smart-proxy/config/state.json
