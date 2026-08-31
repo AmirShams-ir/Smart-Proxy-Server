@@ -16,7 +16,7 @@ set -Eeuo pipefail
 # Project
 ###############################################################################
 
-VERSION="2.0.2"
+VERSION="2.0.3"
 PROJECT="Smart Proxy Server"
 
 SUPPORTED_OS=("debian" "ubuntu")
@@ -54,29 +54,16 @@ RESET='\033[0m'
 # Logging
 ###############################################################################
 
-info() {
-    printf "${BLUE}[*] %s${RESET}\n" "$1"
-}
-
-success() {
-    printf "${GREEN}[✓] %s${RESET}\n" "$1"
-}
-
-warning() {
-    printf "${YELLOW}[!] %s${RESET}\n" "$1"
-}
-
-fatal() {
-    printf "${RED}[✗] %s${RESET}\n" "$1"
-    exit 1
-}
+info() { printf "${BLUE}[*] %s${RESET}\n" "$1"; }
+success() { printf "${GREEN}[✓] %s${RESET}\n" "$1"; }
+warning() { printf "${YELLOW}[!] %s${RESET}\n" "$1"; }
+fatal() { printf "${RED}[✗] %s${RESET}\n" "$1"; exit 1; }
 
 ###############################################################################
 # Banner
 ###############################################################################
 
 banner() {
-
 cat <<EOF
 
 ==============================================================
@@ -94,16 +81,13 @@ https://github.com/AmirShams-ir/Smart-Proxy-Server
 ==============================================================
 
 EOF
-
 }
 
 ###############################################################################
 # Root
 ###############################################################################
 
-require_root() {
-    [[ "$EUID" -eq 0 ]] || fatal "Please run as root."
-}
+require_root() { [[ "$EUID" -eq 0 ]] || fatal "Please run as root."; }
 
 ###############################################################################
 # OS
@@ -111,20 +95,12 @@ require_root() {
 
 require_os() {
     [[ -f /etc/os-release ]] || fatal "Cannot detect operating system."
-
     local ID PRETTY_NAME
     source /etc/os-release
-
     case "$ID" in
-        debian|ubuntu)
-            success "$PRETTY_NAME"
-        ;;
-        *)
-            fatal "Unsupported operating system."
-        ;;
+        debian|ubuntu) success "$PRETTY_NAME" ;;
+        *) fatal "Unsupported operating system." ;;
     esac
-
-    VERSION="2.0.2"
 }
 
 ###############################################################################
@@ -132,10 +108,8 @@ require_os() {
 ###############################################################################
 
 start_log() {
-
     mkdir -p "$LOG_DIR"
     touch "$LOG_FILE"
-
     exec > >(tee -a "$LOG_FILE")
     exec 2>&1
 }
@@ -145,13 +119,9 @@ start_log() {
 ###############################################################################
 
 run_script() {
-
     local script="$1"
-
     [[ -f "$script" ]] || fatal "Missing $(basename "$script")"
-
     info "Executing $(basename "$script")"
-
     source "$script"
 }
 
@@ -160,12 +130,9 @@ run_script() {
 ###############################################################################
 
 config_get() {
-
     local KEY="$1"
     local FILE="${CONFIG_DIR}/defaults.conf"
-
     [[ -f "$FILE" ]] || return 1
-
     awk -F= -v key="$KEY" '
         $1 == key {
             value=$0
