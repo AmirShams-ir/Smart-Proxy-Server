@@ -1,8 +1,17 @@
 [Unit]
 Description=Smart Proxy Reload
-After=network-online.target sing-box.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/bin/bash /opt/smart-proxy/reload.sh
+Type=exec
+User=root
+WorkingDirectory=/opt/smart-proxy
+
+ExecStart=/usr/bin/stdbuf -oL -eL /bin/bash /opt/smart-proxy/reload.sh
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
