@@ -5,8 +5,6 @@ cd "$(dirname "$0")"
 # shellcheck source=/dev/null
 source lib/common.sh
 
-# Keep the project VERSION immutable. /etc/os-release may define VERSION,
-# so OS detection uses a scoped source inside require_os().
 start_log
 banner
 require_root
@@ -97,7 +95,6 @@ cp -a . /opt/smart-proxy
 install -m 644 config/defaults.conf /etc/sing-box/defaults.conf
 install -m 644 config/state.json /etc/sing-box/proxy-state.json
 
-# Keep runtime profiles identical to repository
 rm -f /etc/sing-box/profiles/*.txt
 cp -f profile/*.txt /etc/sing-box/profiles/
 chmod 600 /etc/sing-box/profiles/*.txt
@@ -106,10 +103,10 @@ install -m 755 lib/*.sh /opt/smart-proxy/lib/
 
 install -m 644 systemd/sing-box.service \
   /etc/systemd/system/sing-box.service
-install -m 644 systemd/rearm.service \
-  /etc/systemd/system/proxy-rearm.service
-install -m 644 systemd/rearm.timer \
-  /etc/systemd/system/proxy-rearm.timer
+install -m 644 systemd/reload.service \
+  /etc/systemd/system/smart-proxy-reload.service
+install -m 644 systemd/reload.timer \
+  /etc/systemd/system/smart-proxy-reload.timer
 
 ln -sf /etc/sing-box/defaults.conf /opt/smart-proxy/config/defaults.conf
 ln -sf /etc/sing-box/proxy-state.json /opt/smart-proxy/config/state.json
@@ -117,7 +114,19 @@ ln -sf /etc/sing-box/proxy-state.json /opt/smart-proxy/config/state.json
 rm -f /etc/sing-box/config.json
 
 systemctl stop sing-box 2>/dev/null || true
+systemctl disable --now proxy-rearm.timer 2>/dev/null || true
+systemctl disable --now proxy-rearm.service 2>/dev/null || true
+systemctl disable --now rearm.timer 2>/dev/null || true
+systemctl disable --now rearm.service 2>/dev/null || true
 systemctl daemon-reload
+
+# Convert the human-friendly interval in defaults.conf to a systemd time span.
+HEALTH_INTERVAL=$(config_get HEALTH_INTERVAL || true)
+HEALTH_INTERVAL=${HEALTH_INTERVAL:-1h}
+case "$HEALTH_INTERVAL" in
+  *[!0-9smhdw]*|"") fatal "Invalid HEALTH_INTERVAL: $HEALTH_INTERVAL (use e.g. 30m, 1h, 2h)" ;;
+esac
+sed -i -E "s#^OnUnitActiveSec=.*#OnUnitActiveSec=${HEALTH_INTERVAL}#" /etc/systemd/system/smart-proxy-reload.timer
 
 if /opt/smart-proxy/lib/race.sh; then
   if ! sing-box check -c /etc/sing-box/config.json; then
@@ -129,6 +138,6 @@ else
 fi
 
 systemctl enable --now sing-box
-systemctl enable --now proxy-rearm.timer
+systemctl enable --now smart-proxy-reload.timer
 
 success "${PROJECT} v${VERSION} installation completed."
