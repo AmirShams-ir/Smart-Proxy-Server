@@ -32,6 +32,10 @@ mkdir -p "$RESULT_DIR"
 trap 'rm -f "$RESULT_FILE"' EXIT
 : > "$RESULT_FILE"
 
+###############################################################################
+# Report helpers
+###############################################################################
+
 printf '\n'
 info "Testing proxy profiles..."
 printf '\n'
@@ -62,6 +66,12 @@ is_better() {
     }'
 }
 
+print_row() {
+    local name="$1" host="$2" rtt="$3" jitter="$4" loss="$5" success="$6" score="$7"
+    printf '%-24s %-28s %10sms %9sms %7s%% %7s%% %7s\n' \
+        "$name" "$host" "$rtt" "$jitter" "$loss" "$success" "$score"
+}
+
 for file in "${profiles[@]}"; do
     name="$(basename "$file" .txt)"
     health=""
@@ -88,22 +98,30 @@ for file in "${profiles[@]}"; do
         continue
     fi
 
-    score="$(printf '%s\n' "$scored" | sed -n 's/.*\bscore=\([0-9][0-9]*\)\b.*/\1/p')"
-    host="$(printf '%s\n' "$health" | sed -n 's/.*\bhost=\([^ ]*\)\b.*/\1/p')"
-    port="$(printf '%s\n' "$health" | sed -n 's/.*\bport=\([^ ]*\)\b.*/\1/p')"
-    rtt="$(printf '%s\n' "$health" | sed -n 's/.*\brtt=\([^ ]*\)\b.*/\1/p')"
-    jitter="$(printf '%s\n' "$health" | sed -n 's/.*\bjitter=\([^ ]*\)\b.*/\1/p')"
-    loss="$(printf '%s\n' "$health" | sed -n 's/.*\bloss=\([^ ]*\)\b.*/\1/p')"
-    success_rate="$(printf '%s\n' "$health" | sed -n 's/.*\bsuccess=\([^ ]*\)\b.*/\1/p')"
+    # Parse each key explicitly. Do not infer positional fields from the
+    # formatted report: health.sh's contract is key=value tokens.
+    host="$(printf '%s\n' "$health" | sed -n 's/.*[[:space:]]host=\([^[:space:]]*\).*/\1/p')"
+    port="$(printf '%s\n' "$health" | sed -n 's/.*[[:space:]]port=\([^[:space:]]*\).*/\1/p')"
+    rtt="$(printf '%s\n' "$health" | sed -n 's/.*[[:space:]]rtt=\([^[:space:]]*\).*/\1/p')"
+    jitter="$(printf '%s\n' "$health" | sed -n 's/.*[[:space:]]jitter=\([^[:space:]]*\).*/\1/p')"
+    loss="$(printf '%s\n' "$health" | sed -n 's/.*[[:space:]]loss=\([^[:space:]]*\).*/\1/p')"
+    success_rate="$(printf '%s\n' "$health" | sed -n 's/.*[[:space:]]success=\([^[:space:]]*\).*/\1/p')"
+    score="$(printf '%s\n' "$scored" | sed -n 's/.*[[:space:]]score=\([^[:space:]]*\).*/\1/p')"
 
     if [[ ! "$score" =~ ^[0-9]+$ ]]; then
-        printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "${host:--}" "${rtt:--}" "${jitter:--}" "${loss:--}" "${success_rate:--}" "ERROR"
+        print_row "$name" "${host:--}" "${rtt:--}" "${jitter:--}" "${loss:--}" "${success_rate:--}" "ERROR"
         printf '[ERROR] %s: invalid score output: %s\n' "$name" "$scored" >&2
         errors=$((errors + 1))
         continue
     fi
 
-    [[ -n "$host" ]] || { printf '[ERROR] %s: missing host in health result\n' "$name" >&2; errors=$((errors + 1)); continue; }
+    [[ -n "$host" ]] || {
+        print_row "$name" "-" "-" "-" "-" "-" "ERROR"
+        printf '[ERROR] %s: missing host in health result: %s\n' "$name" "$health" >&2
+        errors=$((errors + 1))
+        continue
+    }
+
     [[ "$rtt" =~ ^[0-9]+([.][0-9]+)?$ ]] || rtt=999999
     [[ "$jitter" =~ ^[0-9]+([.][0-9]+)?$ ]] || jitter=999999
     [[ "$loss" =~ ^[0-9]+([.][0-9]+)?$ ]] || loss=100
@@ -111,6 +129,7 @@ for file in "${profiles[@]}"; do
     [[ "$port" =~ ^[0-9]+$ ]] || port=0
 
     printf '%s\n' "$name|$host|$port|$rtt|$jitter|$loss|$success_rate|$score" >> "$RESULT_FILE"
+    print_row "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
     usable=$((usable + 1))
 
     if is_better "$score" "$best_score" "$success_rate" "$best_success" "$rtt" "$best_rtt" "$jitter" "$best_jitter" "$name" "$best_name"; then
@@ -136,8 +155,7 @@ printf '%s\n' '-----------------------------------------------------------------
 
 sort -t'|' -k8,8nr -k7,7nr -k4,4n -k5,5n -k1,1 "$RESULT_FILE" |
 while IFS='|' read -r name host port rtt jitter loss success_rate score; do
-    printf '%-24s %-28s %8sms %7sms %7s%% %7s%% %7s\n' \
-      "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
+    print_row "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
 done
 
 printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
@@ -149,6 +167,7 @@ printf 'Profile : %s\n' "$best_name"
 printf 'Score   : %s/100\n' "$best_score"
 printf 'RTT     : %sms\n' "$best_rtt"
 printf 'Jitter  : %sms\n' "$best_jitter"
+printf 'Loss    : %s%%\n' "$([ "$best_name" ] && awk -F'|' -v n="$best_name" '$1==n {print $6; exit}' "$RESULT_FILE")"
 printf 'Success : %s%%\n' "$best_success"
 echo "----------------------------------------------------------------------------------------------------------------"
 
