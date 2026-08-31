@@ -4,10 +4,8 @@ set -Eeuo pipefail
 
 ###############################################################################
 # Smart Proxy Server - Reload / Race Report
-# Runs the health + scoring race and prints a human-readable report.
-#
-# IMPORTANT: health.sh must remain a pure endpoint-metrics provider. If it
-# cannot produce metrics, the error is shown rather than silently discarded.
+# Runs health + scoring exactly once, prints a deterministic ranking, then
+# applies the same result set through race.sh.
 ###############################################################################
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +19,7 @@ if ! flock -n 9; then
     exit 0
 fi
 
-PROFILE_ROOT="${PROFILE_DIR}"
+PROFILE_ROOT="$PROFILE_DIR"
 if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit)" ]]; then
     [[ -d "$BASE_DIR/profiles" ]] && PROFILE_ROOT="$BASE_DIR/profiles"
 fi
@@ -31,18 +29,18 @@ mapfile -t profiles < <(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' |
 shopt -u nullglob
 [[ ${#profiles[@]} -gt 0 ]] || fatal "No proxy profiles found in $PROFILE_ROOT"
 
-printf '\n'
-info "Testing proxy profiles..."
-printf '\n'
-printf '%-24s %-28s %7s %9s %7s %7s %7s\n' \
-  "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
-printf '%s\n' '---------------------------------------------------------------------------------------------------------------'
-
 RESULT_DIR="/run/smartproxy"
 RESULT_FILE="${RESULT_DIR}/race-results.$$"
 mkdir -p "$RESULT_DIR"
 trap 'rm -f "$RESULT_FILE"' EXIT
 : > "$RESULT_FILE"
+
+printf '\n'
+info "Testing proxy profiles..."
+printf '\n'
+printf '%-24s %-28s %10s %9s %7s %7s %7s\n' \
+  "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
+printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
 best_name=""
 best_score=-1
@@ -50,22 +48,26 @@ best_success=-1
 best_rtt=999999
 best_jitter=999999
 usable=0
+errors=0
 
 for file in "${profiles[@]}"; do
     name="$(basename "$file" .txt)"
-
-    # Capture stderr separately so failures are visible in the report/log.
     health_err=""
     health=""
-    if ! health="$(${BASE_DIR}/lib/health.sh "$file" 2>&1)"; then
-        printf '%-24s %-28s %7s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
+
+    if health="$(${BASE_DIR}/lib/health.sh "$file" 2>&1)"; then
+        :
+    else
+        printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
         printf '[ERROR] %s: %s\n' "$name" "$health" >&2
+        ((errors+=1))
         continue
     fi
 
     if [[ -z "$health" ]]; then
-        printf '%-24s %-28s %7s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
+        printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
         printf '[ERROR] %s: health.sh returned no metrics\n' "$name" >&2
+        ((errors+=1))
         continue
     fi
 
@@ -77,8 +79,8 @@ for file in "${profiles[@]}"; do
     loss="$(printf '%s\n' "$health" | sed -n 's/.* loss=\([^ ]*\).*/\1/p')"
     success_rate="$(printf '%s\n' "$health" | sed -n 's/.* success=\([^ ]*\).*/\1/p')"
 
-    [[ "$score" =~ ^[0-9]+$ ]] || { printf '[ERROR] %s: invalid score from health/score: %s\n' "$name" "$scored" >&2; continue; }
-    [[ -n "$host" ]] || { printf '[ERROR] %s: health output has no host: %s\n' "$name" "$health" >&2; continue; }
+    [[ "$score" =~ ^[0-9]+$ ]] || { printf '[ERROR] %s: invalid score: %s\n' "$name" "$scored" >&2; ((errors+=1)); continue; }
+    [[ -n "$host" ]] || { printf '[ERROR] %s: missing host in health result\n' "$name" >&2; ((errors+=1)); continue; }
     [[ "$rtt" =~ ^[0-9]+([.][0-9]+)?$ ]] || rtt=999999
     [[ "$jitter" =~ ^[0-9]+([.][0-9]+)?$ ]] || jitter=999999
     [[ "$loss" =~ ^[0-9]+([.][0-9]+)?$ ]] || loss=100
@@ -87,7 +89,7 @@ for file in "${profiles[@]}"; do
     printf '%s\n' "$name|$host|$rtt|$jitter|$loss|$success_rate|$score" >> "$RESULT_FILE"
     ((usable+=1))
 
-    if awk -v s="$score" -v bs="$best_score" -v suc="$success_rate" -v bsuc="$best_success" -v r="$rtt" -v br="$best_rtt" -v j="$jitter" -v bj="$best_jitter" 'BEGIN {
+    if awk -v s="$score" -v bs="$best_score" -v suc="$success_rate" -v bsuc="$best_success" -v r="$rtt" -v br="$best_rtt" -v j="$jitter" -v bj="$best_jitter" -v n="$name" -v bn="$best_name" 'BEGIN {
         if (s > bs) exit 0
         if (s < bs) exit 1
         if (suc > bsuc) exit 0
@@ -95,6 +97,8 @@ for file in "${profiles[@]}"; do
         if (r < br) exit 0
         if (r > br) exit 1
         if (j < bj) exit 0
+        if (j > bj) exit 1
+        if (bn == "" || n < bn) exit 0
         exit 1
     }'; then
         best_score="$score"
@@ -103,9 +107,10 @@ for file in "${profiles[@]}"; do
         best_rtt="$rtt"
         best_jitter="$jitter"
     fi
+
 done
 
-printf '%s\n' '---------------------------------------------------------------------------------------------------------------'
+printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
 if (( usable == 0 )); then
     fatal "No usable proxy profile found. Check: bash -x lib/health.sh <profile>"
@@ -114,38 +119,56 @@ fi
 printf '\n'
 info "Ranking proxy profiles..."
 printf '\n'
-printf '%-24s %-28s %7s %9s %7s %7s %7s\n' \
+printf '%-24s %-28s %10s %9s %7s %7s %7s\n' \
   "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
-printf '%s\n' '---------------------------------------------------------------------------------------------------------------'
+printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
-sort -t'|' -k7,7nr -k6,6nr -k3,3n -k4,4n "$RESULT_FILE" |
+sort -t'|' -k7,7nr -k6,6nr -k3,3n -k4,4n -k1,1 "$RESULT_FILE" |
 while IFS='|' read -r name host rtt jitter loss success_rate score; do
-    printf '%-24s %-28s %7sms %9sms %7s%% %7s%% %7s\n' \
+    printf '%-24s %-28s %8sms %7sms %7s%% %7s%% %7s\n' \
       "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
 done
 
-printf '%s\n' '---------------------------------------------------------------------------------------------------------------'
+printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
 echo
 echo "Winner"
-echo "---------------------------------------------------------------------------------------------------------------"
+echo "----------------------------------------------------------------------------------------------------------------"
 printf 'Profile : %s\n' "$best_name"
 printf 'Score   : %s/100\n' "$best_score"
 printf 'RTT     : %sms\n' "$best_rtt"
 printf 'Jitter  : %sms\n' "$best_jitter"
 printf 'Success : %s%%\n' "$best_success"
-echo "---------------------------------------------------------------------------------------------------------------"
-
-###############################################################################
-# Apply race decision.
-#
-# race.sh still owns hysteresis/state/generator/reload. Because its current
-# implementation does not yet consume RESULT_FILE, it will perform its own
-# health pass here. The report above remains the user-facing race report.
-###############################################################################
+echo "----------------------------------------------------------------------------------------------------------------"
 
 info "Applying race decision..."
 RACE_RESULT_FILE="$RESULT_FILE" "${BASE_DIR}/lib/race.sh"
+
+active=""
+if [[ -f "$STATE_FILE" ]]; then
+    active="$(python3 - "$STATE_FILE" <<'PY'
+import json,sys
+try:
+    with open(sys.argv[1],encoding='utf-8') as f:
+        print(json.load(f).get('active',''))
+except Exception:
+    print('')
+PY
+)"
+fi
+
+if [[ -n "$active" ]]; then
+    active_score="$(awk -F'|' -v n="$active" '$1==n {print $7; exit}' "$RESULT_FILE")"
+    [[ -n "$active_score" ]] || active_score="unknown"
+    echo
+echo "Active Profile"
+printf 'Profile : %s\n' "$active"
+printf 'Score   : %s/100\n' "$active_score"
+fi
+
+if (( errors > 0 )); then
+    warning "${usable} profiles usable, ${errors} profiles failed health checks."
+fi
 
 echo
 echo "========================================"
