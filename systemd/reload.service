@@ -8,10 +8,9 @@ Type=oneshot
 User=root
 WorkingDirectory=/opt/smart-proxy
 
-# Keep stdout/stderr line-buffered so the complete report is written to journald
-# while the one-shot service is running, just like Smart DNS rearm.service.
-ExecStart=/usr/bin/stdbuf -oL -eL /bin/bash -c 'exec /opt/smart-proxy/reload.sh'
-
+# Send the report to the journal through a dedicated logger. This avoids
+# losing stdout produced by the nested bash/report pipeline.
+ExecStart=/opt/smart-proxy/reload.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=smart-proxy-reload
