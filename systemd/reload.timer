@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Timer]
 OnBootSec=30s
+OnUnitActiveSec=15s
 AccuracySec=1s
 Unit=reload.service
 
