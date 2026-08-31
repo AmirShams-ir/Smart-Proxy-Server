@@ -1,0 +1,13 @@
+[Unit]
+Description=Automatic Smart Proxy Reload
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1h
+AccuracySec=1s
+Unit=reload.service
+
+[Install]
+WantedBy=timers.target
