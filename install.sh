@@ -10,7 +10,7 @@ require_os
 info "Installing ${PROJECT} v${VERSION}..."
 
 apt update
-apt install -y curl ca-certificates iputils-ping python3 jq
+apt install -y curl ca-certificates iputils-ping python3 jq coreutils
 
 if ! command -v sing-box >/dev/null 2>&1; then
   ARCH=$(dpkg --print-architecture)
@@ -57,6 +57,7 @@ rm -f /etc/sing-box/profiles/*.txt
 cp -f profiles/*.txt /etc/sing-box/profiles/
 chmod 600 /etc/sing-box/profiles/*.txt
 install -m 755 lib/*.sh /opt/smart-proxy/lib/
+install -m 755 reload.sh /opt/smart-proxy/reload.sh
 install -m 644 systemd/sing-box.service /etc/systemd/system/sing-box.service
 install -m 644 systemd/reload.service /etc/systemd/system/reload.service
 install -m 644 systemd/reload.timer /etc/systemd/system/reload.timer
