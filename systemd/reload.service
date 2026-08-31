@@ -1,17 +1,20 @@
 [Unit]
 Description=Smart Proxy Reload
-After=network-online.target
+After=network-online.target sing-box.service
 Wants=network-online.target
 
 [Service]
-Type=exec
+Type=oneshot
 User=root
 WorkingDirectory=/opt/smart-proxy
 
-ExecStart=/usr/bin/stdbuf -oL -eL /bin/bash /opt/smart-proxy/reload.sh
+# Keep stdout/stderr line-buffered so the complete report is written to journald
+# while the one-shot service is running, just like Smart DNS rearm.service.
+ExecStart=/usr/bin/stdbuf -oL -eL /bin/bash -c 'exec /opt/smart-proxy/reload.sh'
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=smart-proxy-reload
 
 [Install]
 WantedBy=multi-user.target
