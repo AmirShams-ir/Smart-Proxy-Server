@@ -36,25 +36,34 @@ trap 'rm -f "$RESULT_FILE"' EXIT
 # Report helpers
 ###############################################################################
 
+# Column widths are shared by header and rows. Numeric columns are right-aligned
+# so values with different lengths (0%, 100%, 7ms, 163.740ms, etc.) stay aligned.
 print_header() {
-    printf '%-24s %-28s %10s %9s %7s %9s %7s\n' \
+    printf '%-24s %-28s %11s %9s %7s %9s %7s\n' \
         "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
     printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 }
 
 print_row() {
     local name="$1" host="$2" rtt="$3" jitter="$4" loss="$5" success="$6" score="$7"
-    printf '%-24s %-28s %10sms %9sms %7s%% %8s%% %7s\n' \
-        "$name" "$host" "$rtt" "$jitter" "$loss" "$success" "$score"
+    printf '%-24s %-28s %11s %9s %7s %9s %7s\n' \
+        "$name" "$host" "${rtt}ms" "${jitter}ms" "${loss}%" "${success}%" "$score"
 }
 
 parse_kv() {
     local input="$1" key="$2"
-    awk -v key="$key" '{for(i=1;i<=NF;i++){split($i,a,"="); if(a[1]==key){print substr($i,length(key)+2); exit}}}' <<< "$input"
+    awk -v key="$key" '{
+        for (i = 1; i <= NF; i++) {
+            if (index($i, key "=") == 1) {
+                print substr($i, length(key) + 2)
+                exit
+            }
+        }
+    }' <<< "$input"
 }
 
 is_number() {
-    [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+    [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
 }
 
 is_better() {
@@ -191,7 +200,7 @@ PY
 fi
 
 if [[ -n "$active" ]]; then
-    active_score="$(awk -F'|' -v n="$active" '$1==n {print $8; exit}' "$RESULT_FILE")"
+    active_score="$(awk -F'|' -v n="$active" '$1 == n {print $8; exit}' "$RESULT_FILE")"
     [[ -n "$active_score" ]] || active_score="unknown"
     echo
 echo "Active Profile"
