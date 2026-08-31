@@ -3,8 +3,6 @@ set -Eeuo pipefail
 
 ###############################################################################
 # Smart Proxy Server - Reload / Race Report
-# Runs health + scoring exactly once, prints a deterministic ranking, then
-# applies the same result set through race.sh.
 ###############################################################################
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +17,7 @@ if ! flock -n 9; then
 fi
 
 PROFILE_ROOT="$PROFILE_DIR"
-if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit)" ]]; then
+if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit 2>/dev/null)" ]]; then
     [[ -d "$BASE_DIR/profiles" ]] && PROFILE_ROOT="$BASE_DIR/profiles"
 fi
 
@@ -49,75 +47,85 @@ best_jitter=999999
 usable=0
 errors=0
 
+is_better() {
+    awk -v s="$1" -v bs="$2" \
+        -v suc="$3" -v bsuc="$4" \
+        -v r="$5" -v br="$6" \
+        -v j="$7" -v bj="$8" \
+        -v n="$9" -v bn="${10}" 'BEGIN {
+        if (s != bs) exit !(s > bs)
+        if (suc != bsuc) exit !(suc > bsuc)
+        if (r != br) exit !(r < br)
+        if (j != bj) exit !(j < bj)
+        if (bn == "") exit 0
+        exit !(n < bn)
+    }'
+}
+
 for file in "${profiles[@]}"; do
     name="$(basename "$file" .txt)"
     health=""
 
-    if health="$(${BASE_DIR}/lib/health.sh "$file" 2>&1)"; then
-        :
-    else
+    if ! health="$(${BASE_DIR}/lib/health.sh "$file" 2>&1)"; then
         printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
         printf '[ERROR] %s: %s\n' "$name" "$health" >&2
-        ((errors+=1))
+        errors=$((errors + 1))
         continue
     fi
 
-    if [[ -z "$health" ]]; then
+    [[ -n "$health" ]] || {
         printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
         printf '[ERROR] %s: health.sh returned no metrics\n' "$name" >&2
-        ((errors+=1))
+        errors=$((errors + 1))
         continue
-    fi
+    }
 
-    if ! scored="$(printf '%s\n' "$health" | "${BASE_DIR}/lib/score.sh")"; then
+    scored=""
+    if ! scored="$(printf '%s\n' "$health" | "${BASE_DIR}/lib/score.sh" 2>&1)"; then
         printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "-" "-" "-" "-" "-" "ERROR"
-        printf '[ERROR] %s: score.sh failed: %s\n' "$name" "$health" >&2
-        ((errors+=1))
+        printf '[ERROR] %s: score.sh failed: %s\n' "$name" "$scored" >&2
+        errors=$((errors + 1))
         continue
     fi
 
-    score="$(printf '%s\n' "$scored" | sed -n 's/.*score=\([^ ]*\).*/\1/p')"
-    host="$(printf '%s\n' "$health" | sed -n 's/.*host=\([^ ]*\).*/\1/p')"
-    rtt="$(printf '%s\n' "$health" | sed -n 's/.* rtt=\([^ ]*\).*/\1/p')"
-    jitter="$(printf '%s\n' "$health" | sed -n 's/.* jitter=\([^ ]*\).*/\1/p')"
-    loss="$(printf '%s\n' "$health" | sed -n 's/.* loss=\([^ ]*\).*/\1/p')"
-    success_rate="$(printf '%s\n' "$health" | sed -n 's/.* success=\([^ ]*\).*/\1/p')"
+    score="$(printf '%s\n' "$scored" | sed -n 's/.*\bscore=\([0-9][0-9]*\)\b.*/\1/p')"
+    host="$(printf '%s\n' "$health" | sed -n 's/.*\bhost=\([^ ]*\)\b.*/\1/p')"
+    port="$(printf '%s\n' "$health" | sed -n 's/.*\bport=\([^ ]*\)\b.*/\1/p')"
+    rtt="$(printf '%s\n' "$health" | sed -n 's/.*\brtt=\([^ ]*\)\b.*/\1/p')"
+    jitter="$(printf '%s\n' "$health" | sed -n 's/.*\bjitter=\([^ ]*\)\b.*/\1/p')"
+    loss="$(printf '%s\n' "$health" | sed -n 's/.*\bloss=\([^ ]*\)\b.*/\1/p')"
+    success_rate="$(printf '%s\n' "$health" | sed -n 's/.*\bsuccess=\([^ ]*\)\b.*/\1/p')"
 
-    [[ "$score" =~ ^[0-9]+$ ]] || { printf '[ERROR] %s: invalid score: %s\n' "$name" "$scored" >&2; ((errors+=1)); continue; }
-    [[ -n "$host" ]] || { printf '[ERROR] %s: missing host in health result\n' "$name" >&2; ((errors+=1)); continue; }
+    if [[ ! "$score" =~ ^[0-9]+$ ]]; then
+        printf '%-24s %-28s %10s %9s %7s %7s %7s\n' "$name" "${host:--}" "${rtt:--}" "${jitter:--}" "${loss:--}" "${success_rate:--}" "ERROR"
+        printf '[ERROR] %s: invalid score output: %s\n' "$name" "$scored" >&2
+        errors=$((errors + 1))
+        continue
+    fi
+
+    [[ -n "$host" ]] || { printf '[ERROR] %s: missing host in health result\n' "$name" >&2; errors=$((errors + 1)); continue; }
     [[ "$rtt" =~ ^[0-9]+([.][0-9]+)?$ ]] || rtt=999999
     [[ "$jitter" =~ ^[0-9]+([.][0-9]+)?$ ]] || jitter=999999
     [[ "$loss" =~ ^[0-9]+([.][0-9]+)?$ ]] || loss=100
     [[ "$success_rate" =~ ^[0-9]+([.][0-9]+)?$ ]] || success_rate=0
+    [[ "$port" =~ ^[0-9]+$ ]] || port=0
 
-    printf '%s\n' "$name|$host|$rtt|$jitter|$loss|$success_rate|$score" >> "$RESULT_FILE"
+    printf '%s\n' "$name|$host|$port|$rtt|$jitter|$loss|$success_rate|$score" >> "$RESULT_FILE"
     usable=$((usable + 1))
 
-    if awk -v s="$score" -v bs="$best_score" -v suc="$success_rate" -v bsuc="$best_success" -v r="$rtt" -v br="$best_rtt" -v j="$jitter" -v bj="$best_jitter" -v n="$name" -v bn="$best_name" 'BEGIN {
-        if (s > bs) exit 0
-        if (s < bs) exit 1
-        if (suc > bsuc) exit 0
-        if (suc < bsuc) exit 1
-        if (r < br) exit 0
-        if (r > br) exit 1
-        if (j < bj) exit 0
-        if (j > bj) exit 1
-        if (bn == "" || n < bn) exit 0
-        exit 1
-    }'; then
+    if is_better "$score" "$best_score" "$success_rate" "$best_success" "$rtt" "$best_rtt" "$jitter" "$best_jitter" "$name" "$best_name"; then
         best_score="$score"
         best_name="$name"
         best_success="$success_rate"
         best_rtt="$rtt"
         best_jitter="$jitter"
     fi
+
 done
 
 printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
-if (( usable == 0 )); then
-    fatal "No usable proxy profile found. Check: bash -x lib/health.sh <profile-file>"
-fi
+(( usable > 0 )) || fatal "No usable proxy profile found. Check: bash -x lib/health.sh <profile-file>"
 
 printf '\n'
 info "Ranking proxy profiles..."
@@ -126,8 +134,8 @@ printf '%-24s %-28s %10s %9s %7s %7s %7s\n' \
   "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
 printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
 
-sort -t'|' -k7,7nr -k6,6nr -k3,3n -k4,4n -k1,1 "$RESULT_FILE" |
-while IFS='|' read -r name host rtt jitter loss success_rate score; do
+sort -t'|' -k8,8nr -k7,7nr -k4,4n -k5,5n -k1,1 "$RESULT_FILE" |
+while IFS='|' read -r name host port rtt jitter loss success_rate score; do
     printf '%-24s %-28s %8sms %7sms %7s%% %7s%% %7s\n' \
       "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
 done
@@ -161,7 +169,7 @@ PY
 fi
 
 if [[ -n "$active" ]]; then
-    active_score="$(awk -F'|' -v n="$active" '$1 == n {print $7; exit}' "$RESULT_FILE")"
+    active_score="$(awk -F'|' -v n="$active" '$1 == n {print $8; exit}' "$RESULT_FILE")"
     [[ -n "$active_score" ]] || active_score="unknown"
     echo
 echo "Active Profile"
