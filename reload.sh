@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# When running under systemd, send every line explicitly to the journal.
+# Under an interactive shell this remains normal stdout/stderr.
+if [[ -n "${INVOCATION_ID:-}" ]] && command -v systemd-cat >/dev/null 2>&1; then
+    if [[ -z "${SMARTPROXY_JOURNALIZED:-}" ]]; then
+        export SMARTPROXY_JOURNALIZED=1
+        exec > >(systemd-cat -t smart-proxy-reload -p info) 2> >(systemd-cat -t smart-proxy-reload -p err)
+    fi
+fi
+
 chmod +x lib/health.sh
 chmod +x lib/score.sh
 
@@ -39,8 +48,6 @@ trap 'rm -f "$RESULT_FILE"' EXIT
 # Report helpers
 ###############################################################################
 
-# Column widths are shared by header and rows. Numeric columns are right-aligned
-# so values with different lengths (0%, 100%, 7ms, 163.740ms, etc.) stay aligned.
 print_header() {
     printf '%-24s %-28s %11s %9s %7s %9s %7s\n' \
         "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
