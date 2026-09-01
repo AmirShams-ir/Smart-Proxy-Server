@@ -69,9 +69,9 @@ rm -f /etc/sing-box/config.json
 systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
 
-chmod +x /lib/timer.sh
-chmod +x /lib/race.sh
-chmod +x /lib/test.sh
+chmod +x lib/timer.sh
+chmod +x lib/race.sh
+chmod +x lib/test.sh
 
 ./lib/timer.sh
 
