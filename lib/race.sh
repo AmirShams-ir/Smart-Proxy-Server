@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$BASE_DIR/config/defaults.conf"
 mkdir -p "$LOG_DIR"
@@ -73,14 +74,27 @@ else
   shopt -u nullglob
   for file in "${profiles[@]}"; do
     name="$(basename "$file" .txt)"
-    health="$($BASE_DIR/lib/health.sh "$file" 2>/dev/null || true)"
-    [[ -n "$health" ]] || { log "$name health=error"; continue; }
-    scored="$(printf '%s\n' "$health" | "$BASE_DIR/lib/score.sh")"
+    health=""
+    health_error=""
+    if ! health="$($BASE_DIR/lib/health.sh "$file" 2>&1)"; then
+      health_error="$health"
+      log "$name health=error: ${health_error:-unknown health failure}"
+      continue
+    fi
+    if [[ -z "$health" ]]; then
+      log "$name health=error: health.sh returned no metrics"
+      continue
+    fi
+    scored=""
+    if ! scored="$(printf '%s\n' "$health" | "$BASE_DIR/lib/score.sh" 2>&1)"; then
+      log "$name score=error: ${scored:-unknown score failure}"
+      continue
+    fi
     score="$(printf '%s\n' "$scored" | sed -n 's/.*score=\([0-9]*\).*/\1/p')"
     rtt="$(printf '%s\n' "$health" | sed -n 's/.* rtt=\([^ ]*\).*/\1/p')"
     jitter="$(printf '%s\n' "$health" | sed -n 's/.* jitter=\([^ ]*\).*/\1/p')"
     success="$(printf '%s\n' "$health" | sed -n 's/.* success=\([^ ]*\).*/\1/p')"
-    [[ "$score" =~ ^[0-9]+$ ]] || continue
+    [[ "$score" =~ ^[0-9]+$ ]] || { log "$name score=error: invalid output: $scored"; continue; }
     log "$name $health $scored"
     if is_better "$score" "$best_score" "$success" "$best_success" "$rtt" "$best_rtt" "$jitter" "$best_jitter" "$name" "$best_name"; then
       best_score="$score"; best_name="$name"; best_rtt="$rtt"; best_jitter="$jitter"; best_success="$success"
@@ -90,7 +104,7 @@ fi
 
 if [[ "$MODE" == "manual" ]]; then
   manual_file="$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | sort | head -n1)"
-  [[ -n "$manual_file" ]] || { log "manual mode: no profile found"; exit 1; }
+  [[ -n "$manual_file" ]] || { log "manual mode: no profile found in $PROFILE_ROOT"; exit 1; }
   best_name="$(basename "$manual_file" .txt)"
   log "manual mode active=$best_name"
 fi
