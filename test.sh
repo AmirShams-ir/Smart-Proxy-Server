@@ -54,36 +54,46 @@ socks_http_test(){
 }
 
 measure_download(){
-    local proxy="$1" url="$2" out bytes seconds mbps
-    out="$TMP_DIR/download.out"
+    local proxy="$1" url="$2" out="$TMP_DIR/download.out" bytes seconds mbps http_code
     local start_ns end_ns
     start_ns="$(date +%s%N)"
-    if ! curl -4 -L --max-time 30 --connect-timeout 5 --socks5-hostname "$proxy" -sS -o "$out" "$url"; then
-        fail "Download test: curl failed"
-        return
-    fi
+    http_code="$(curl -4 -L --max-time 30 --connect-timeout 5 --socks5-hostname "$proxy" \
+        -sS -o "$out" -w '%{http_code}' "$url" 2>"$TMP_DIR/download.err" || true)"
     end_ns="$(date +%s%N)"
-    bytes="$(wc -c < "$out")"
-    seconds="$(awk -v a="$start_ns" -v b="$end_ns" 'BEGIN{print (b-a)/1000000000}')"
-    mbps="$(awk -v b="$bytes" -v s="$seconds" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0"}')"
-    ok "Download test: ${bytes} bytes in ${seconds}s (~${mbps} Mbit/s)"
+
+    if [[ "$http_code" =~ ^[23][0-9][0-9]$ ]] && [[ -s "$out" ]]; then
+        bytes="$(wc -c < "$out")"
+        seconds="$(awk -v a="$start_ns" -v b="$end_ns" 'BEGIN{print (b-a)/1000000000}')"
+        mbps="$(awk -v b="$bytes" -v s="$seconds" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0"}')"
+        ok "Download test: ${bytes} bytes in ${seconds}s (~${mbps} Mbit/s, HTTP ${http_code})"
+    else
+        warn "Download test unavailable/failed (HTTP ${http_code:-error}); proxy connectivity remains independently tested"
+        if [[ -s "$TMP_DIR/download.err" ]]; then
+            sed 's/^/    /' "$TMP_DIR/download.err" | tail -n 3
+        fi
+    fi
 }
 
 measure_upload(){
-    local proxy="$1" url="$2" payload="$TMP_DIR/upload.bin" bytes=1048576 start_ns end_ns seconds mbps
+    local proxy="$1" url="$2" payload="$TMP_DIR/upload.bin" bytes=1048576 start_ns end_ns seconds mbps http_code
     if ! head -c "$bytes" /dev/zero > "$payload"; then
         warn "Upload test: could not create payload"
         return
     fi
     start_ns="$(date +%s%N)"
-    if ! curl -4 --max-time 30 --connect-timeout 5 --socks5-hostname "$proxy" -sS -o /dev/null -X POST --data-binary "@$payload" "$url"; then
-        warn "Upload test: endpoint rejected/failed (not necessarily a proxy failure)"
-        return
-    fi
+    http_code="$(curl -4 --max-time 30 --connect-timeout 5 --socks5-hostname "$proxy" \
+        -sS -o /dev/null -w '%{http_code}' -X POST --data-binary "@$payload" "$url" 2>"$TMP_DIR/upload.err" || true)"
     end_ns="$(date +%s%N)"
-    seconds="$(awk -v a="$start_ns" -v b="$end_ns" 'BEGIN{print (b-a)/1000000000}')"
-    mbps="$(awk -v b="$bytes" -v s="$seconds" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0"}')"
-    ok "Upload test: ${bytes} bytes in ${seconds}s (~${mbps} Mbit/s)"
+    if [[ "$http_code" =~ ^[23][0-9][0-9]$ ]]; then
+        seconds="$(awk -v a="$start_ns" -v b="$end_ns" 'BEGIN{print (b-a)/1000000000}')"
+        mbps="$(awk -v b="$bytes" -v s="$seconds" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0"}')"
+        ok "Upload test: ${bytes} bytes in ${seconds}s (~${mbps} Mbit/s, HTTP ${http_code})"
+    else
+        warn "Upload test unavailable/failed (HTTP ${http_code:-error}); endpoint limitation does not imply proxy failure"
+        if [[ -s "$TMP_DIR/upload.err" ]]; then
+            sed 's/^/    /' "$TMP_DIR/upload.err" | tail -n 3
+        fi
+    fi
 }
 
 section "Smart Proxy Server Diagnostics"
@@ -124,10 +134,11 @@ if [[ -f "$CONFIG_FILE" ]] && require_cmd jq; then
 fi
 
 section "4. Listening Ports"
-if ss -lnt 2>/dev/null | grep -Eq '[:.]1080[[:space:]]'; then
-    ok "SOCKS port 1080 is listening"
+SOCKS_PORT="$(jq -r 'first(.inbounds[]? | select(.type=="socks" or .type=="mixed") | .listen_port) // 1080' "$CONFIG_FILE" 2>/dev/null || echo 1080)"
+if ss -lnt 2>/dev/null | grep -Eq "[:.]${SOCKS_PORT}[[:space:]]"; then
+    ok "SOCKS port $SOCKS_PORT is listening"
 else
-    warn "SOCKS port 1080 is not listening"
+    warn "SOCKS port $SOCKS_PORT is not listening"
 fi
 if [[ -f "$CONFIG_FILE" ]] && require_cmd jq; then
     while read -r listen_port; do
@@ -145,8 +156,8 @@ else
 fi
 
 section "6. Current Proxy Connectivity"
-SOCKS_PROXY="127.0.0.1:1080"
-if ss -lnt 2>/dev/null | grep -Eq '[:.]1080[[:space:]]'; then
+SOCKS_PROXY="127.0.0.1:${SOCKS_PORT}"
+if ss -lnt 2>/dev/null | grep -Eq "[:.]${SOCKS_PORT}[[:space:]]"; then
     if curl -4 --max-time 10 --connect-timeout 5 --socks5-hostname "$SOCKS_PROXY" -sS -o "$TMP_DIR/ip.txt" https://ip.sb; then
         ip="$(tr -d '\r\n ' < "$TMP_DIR/ip.txt")"
         [[ -n "$ip" ]] && ok "SOCKS connectivity works (public IP: $ip)" || warn "SOCKS request succeeded but returned no IP"
@@ -155,31 +166,54 @@ if ss -lnt 2>/dev/null | grep -Eq '[:.]1080[[:space:]]'; then
     fi
     socks_http_test "$SOCKS_PROXY" "https://cp.cloudflare.com/generate_204" "Proxy HTTPS"
 else
-    warn "SOCKS tests skipped because port 1080 is not listening"
+    warn "SOCKS tests skipped because port $SOCKS_PORT is not listening"
 fi
 
 section "7. Active Outbound Diagnostics"
 if [[ -f "$CONFIG_FILE" ]] && require_cmd jq; then
-    jq -r '.outbounds[] | select(.tag == (.route // {}) .final)' "$CONFIG_FILE" >/dev/null 2>&1 || true
-    jq '.outbounds[] | select(.tag == (.route.final // ""))' "$CONFIG_FILE" 2>/dev/null | sed 's/^/    /' || true
+    if [[ -n "${active_tag:-}" ]]; then
+        jq --arg tag "$active_tag" '.outbounds[] | select(.tag == $tag)' "$CONFIG_FILE" 2>/dev/null | sed 's/^/    /' || true
+    else
+        warn "Active outbound details unavailable"
+    fi
 fi
 
 section "8. Download / Upload"
-if ss -lnt 2>/dev/null | grep -Eq '[:.]1080[[:space:]]'; then
-    measure_download "$SOCKS_PROXY" "https://speed.hetzner.de/10MB.bin"
-    measure_upload "$SOCKS_PROXY" "https://httpbin.org/post"
+if ss -lnt 2>/dev/null | grep -Eq "[:.]${SOCKS_PORT}[[:space:]]"; then
+    # Prefer Cloudflare's dedicated speed endpoint. If unavailable, report WARN only.
+    if curl -4 -L --max-time 15 --connect-timeout 5 --socks5-hostname "$SOCKS_PROXY" \
+        -sS -o /dev/null -w '%{http_code}' https://speed.cloudflare.com/__down?bytes=1048576 2>"$TMP_DIR/speed-probe.err" | grep -Eq '^2[0-9][0-9]$'; then
+        measure_download "$SOCKS_PROXY" "https://speed.cloudflare.com/__down?bytes=1048576"
+    else
+        warn "Cloudflare speed download endpoint unavailable; download throughput test skipped"
+    fi
+    if require_cmd curl; then
+        measure_upload "$SOCKS_PROXY" "https://httpbin.org/post"
+    fi
 else
     warn "Transfer tests skipped because SOCKS is unavailable"
 fi
 
 section "9. Logs"
 if systemctl is-active --quiet sing-box 2>/dev/null; then
-    info "Recent sing-box errors:"
-    journalctl -u sing-box -n 30 --no-pager 2>/dev/null | grep -Ei 'error|warn|fail|eof|handshake|400|timeout' | tail -n 15 | sed 's/^/    /' || info "No matching recent sing-box errors"
+    info "Recent sing-box issues (last 5 minutes):"
+    recent_errors="$(journalctl -u sing-box --since '5 min ago' --no-pager 2>/dev/null | grep -Ei 'error|warn|fail|eof|handshake|400|timeout' | tail -n 15 || true)"
+    if [[ -n "$recent_errors" ]]; then
+        sed 's/^/    /' <<< "$recent_errors"
+        warn "Recent sing-box warnings/errors detected"
+    else
+        ok "No matching recent sing-box errors"
+    fi
 fi
 if [[ -f "$LOG_DIR/proxy.log" ]]; then
-    info "Recent Smart Proxy log errors:"
-    grep -Ei 'error|fail|eof|handshake|400|timeout' "$LOG_DIR/proxy.log" 2>/dev/null | tail -n 15 | sed 's/^/    /' || info "No matching recent proxy-log errors"
+    info "Recent Smart Proxy issues (last 50 lines):"
+    recent_proxy="$(tail -n 50 "$LOG_DIR/proxy.log" 2>/dev/null | grep -Ei 'error|fail|eof|handshake|400|timeout' || true)"
+    if [[ -n "$recent_proxy" ]]; then
+        sed 's/^/    /' <<< "$recent_proxy"
+        warn "Matching entries found in recent Smart Proxy log"
+    else
+        ok "No matching recent Smart Proxy log errors"
+    fi
 fi
 
 section "10. State"
