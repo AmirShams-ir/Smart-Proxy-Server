@@ -4,6 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Timer]
+# The recurring interval is rendered from config/defaults.conf by install.sh
 OnBootSec=30s
 AccuracySec=1s
 Unit=reload.service
