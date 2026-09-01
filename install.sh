@@ -78,10 +78,20 @@ systemctl disable --now rearm.timer 2>/dev/null || true
 systemctl enable --now sing-box
 systemctl enable --now reload.timer
 
-if ./lib/race.sh; then
+# Run the same full race/report used by normal reloads so the installer shows
+# health metrics, scoring, ranking and the selected active profile.
+if ./reload.sh; then
   sing-box check -c /etc/sing-box/config.json || fatal "Generated sing-box configuration is invalid."
 else
   fatal "Initial race failed. See /var/log/smartproxy/proxy.log for the exact profile/health error."
+fi
+
+printf '\n'
+info "Running post-install diagnostics..."
+if bash ./test.sh; then
+  success "Post-install diagnostics completed successfully."
+else
+  warning "Post-install diagnostics reported failures or warnings. Installation is complete; inspect the test output and rerun: bash test.sh"
 fi
 
 success "${PROJECT} v${VERSION} installation completed."
