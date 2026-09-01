@@ -9,8 +9,7 @@ User=root
 WorkingDirectory=/root/Smart-Proxy-Server
 
 # Run the repository checkout directly so manual tests and systemd use the
-# exact same script and configuration. Keep stdout/stderr attached to
-# journald for a complete report.
+# exact same script and configuration.
 ExecStart=/bin/bash /root/Smart-Proxy-Server/reload.sh
 
 StandardOutput=journal
