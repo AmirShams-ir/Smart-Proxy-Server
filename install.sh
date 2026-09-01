@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Smart Proxy Server - Installer
+# https://github.com/AmirShams-ir/Smart-Proxy-Server
+# Copyright (c) 2026 Amir Shams
+# Licensed under Apache-2.0
+# ==============================================================================
 set -Eeuo pipefail
+
 cd "$(dirname "$0")"
 source lib/common.sh
 start_log
@@ -48,37 +55,33 @@ if ! command -v sing-box >/dev/null 2>&1; then
   fi
 fi
 
-install -d -m 755 /opt/smart-proxy /etc/sing-box /etc/sing-box/profiles /var/log/smartproxy
-rm -rf /opt/smart-proxy
-cp -a . /opt/smart-proxy
+install -d -m 755 /etc/sing-box /etc/sing-box/profiles /var/log/smartproxy
 install -m 644 config/defaults.conf /etc/sing-box/defaults.conf
 install -m 644 config/state.json /etc/sing-box/proxy-state.json
 rm -f /etc/sing-box/profiles/*.txt
 cp -f profiles/*.txt /etc/sing-box/profiles/
 chmod 600 /etc/sing-box/profiles/*.txt
-install -m 755 lib/*.sh /opt/smart-proxy/lib/
-install -m 755 reload.sh /opt/smart-proxy/reload.sh
-install -m 644 systemd/sing-box.service /etc/systemd/system/sing-box.service
+install -m 755 systemd/sing-box.service /etc/systemd/system/sing-box.service
 install -m 644 systemd/reload.service /etc/systemd/system/reload.service
 install -m 644 systemd/reload.timer /etc/systemd/system/reload.timer
-ln -sf /etc/sing-box/defaults.conf /opt/smart-proxy/config/defaults.conf
-ln -sf /etc/sing-box/proxy-state.json /opt/smart-proxy/config/state.json
+
 rm -f /etc/sing-box/config.json
 systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
 
-# Render timer interval from defaults.conf (single source of truth).
-/opt/smart-proxy/lib/timer.sh
+# Runtime and systemd use the repository checkout directly.
+./lib/timer.sh
 
 systemctl disable --now proxy-rearm.timer 2>/dev/null || true
 systemctl disable --now rearm.timer 2>/dev/null || true
 systemctl enable --now sing-box
 systemctl enable --now reload.timer
 
-if /opt/smart-proxy/lib/race.sh; then
+if ./lib/race.sh; then
   sing-box check -c /etc/sing-box/config.json || fatal "Generated sing-box configuration is invalid."
 else
   fatal "At least one valid profile is required for initial installation."
 fi
 
 success "${PROJECT} v${VERSION} installation completed."
+success "Repository runtime path: ${BASE_DIR}"
