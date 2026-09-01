@@ -147,7 +147,23 @@ if [[ -f "$CONFIG_FILE" ]] && require_cmd jq; then
     done < <(jq -r '.inbounds[]? | .listen_port? // empty' "$CONFIG_FILE" 2>/dev/null | sort -nu)
 fi
 
-section "5. Basic Network Connectivity"
+section "5. Timer Configuration"
+HEALTH_INTERVAL="$(get_default HEALTH_INTERVAL 2>/dev/null || true)"
+if [[ -n "$HEALTH_INTERVAL" ]]; then
+    info "Configured HEALTH_INTERVAL: $HEALTH_INTERVAL"
+    timer_interval="$(systemctl cat reload.timer 2>/dev/null | awk -F= '/^[[:space:]]*OnUnitActiveSec=/{print $2; exit}' | tr -d '\r' || true)"
+    if [[ -n "$timer_interval" && "$timer_interval" == "$HEALTH_INTERVAL" ]]; then
+        ok "reload.timer interval matches defaults.conf: $timer_interval"
+    elif [[ -z "$timer_interval" ]]; then
+        fail "reload.timer has no OnUnitActiveSec; HEALTH_INTERVAL is not applied"
+    else
+        fail "reload.timer interval mismatch: configured=$HEALTH_INTERVAL actual=$timer_interval"
+    fi
+else
+    fail "HEALTH_INTERVAL is missing from defaults.conf"
+fi
+
+section "6. Basic Network Connectivity"
 http_test "https://cp.cloudflare.com/generate_204" "Direct Internet connectivity"
 if require_cmd dig; then
     if dig +short +time=3 +tries=1 cloudflare.com | grep -q .; then ok "DNS resolution works"; else warn "DNS resolution failed"; fi
@@ -155,7 +171,7 @@ else
     warn "dig not installed; DNS test skipped"
 fi
 
-section "6. Current Proxy Connectivity"
+section "7. Current Proxy Connectivity"
 SOCKS_PROXY="127.0.0.1:${SOCKS_PORT}"
 if ss -lnt 2>/dev/null | grep -Eq "[:.]${SOCKS_PORT}[[:space:]]"; then
     if curl -4 --max-time 10 --connect-timeout 5 --socks5-hostname "$SOCKS_PROXY" -sS -o "$TMP_DIR/ip.txt" https://ip.sb; then
@@ -169,7 +185,7 @@ else
     warn "SOCKS tests skipped because port $SOCKS_PORT is not listening"
 fi
 
-section "7. Active Outbound Diagnostics"
+section "8. Active Outbound Diagnostics"
 if [[ -f "$CONFIG_FILE" ]] && require_cmd jq; then
     if [[ -n "${active_tag:-}" ]]; then
         jq --arg tag "$active_tag" '.outbounds[] | select(.tag == $tag)' "$CONFIG_FILE" 2>/dev/null | sed 's/^/    /' || true
@@ -178,9 +194,8 @@ if [[ -f "$CONFIG_FILE" ]] && require_cmd jq; then
     fi
 fi
 
-section "8. Download / Upload"
+section "9. Download / Upload"
 if ss -lnt 2>/dev/null | grep -Eq "[:.]${SOCKS_PORT}[[:space:]]"; then
-    # Prefer Cloudflare's dedicated speed endpoint. If unavailable, report WARN only.
     if curl -4 -L --max-time 15 --connect-timeout 5 --socks5-hostname "$SOCKS_PROXY" \
         -sS -o /dev/null -w '%{http_code}' https://speed.cloudflare.com/__down?bytes=1048576 2>"$TMP_DIR/speed-probe.err" | grep -Eq '^2[0-9][0-9]$'; then
         measure_download "$SOCKS_PROXY" "https://speed.cloudflare.com/__down?bytes=1048576"
@@ -194,7 +209,7 @@ else
     warn "Transfer tests skipped because SOCKS is unavailable"
 fi
 
-section "9. Logs"
+section "10. Logs"
 if systemctl is-active --quiet sing-box 2>/dev/null; then
     info "Recent sing-box issues (last 5 minutes):"
     recent_errors="$(journalctl -u sing-box --since '5 min ago' --no-pager 2>/dev/null | grep -Ei 'error|warn|fail|eof|handshake|400|timeout' | tail -n 15 || true)"
@@ -212,11 +227,11 @@ if [[ -f "$LOG_DIR/proxy.log" ]]; then
         sed 's/^/    /' <<< "$recent_proxy"
         warn "Matching entries found in recent Smart Proxy log"
     else
-        ok "No matching recent Smart Proxy log errors"
+        ok "No matching Smart Proxy log errors"
     fi
 fi
 
-section "10. State"
+section "11. State"
 if [[ -f "$STATE_FILE" ]] && require_cmd jq; then
     if jq empty "$STATE_FILE" >/dev/null 2>&1; then
         ok "State JSON is valid"
