@@ -67,26 +67,9 @@ rm -f /etc/sing-box/config.json
 systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
 
-# Render timer interval from defaults.conf (for example 1h, 2h, 30m).
-HEALTH_INTERVAL="$(config_get HEALTH_INTERVAL)"
-[[ "$HEALTH_INTERVAL" =~ ^[0-9]+([smhdw])$ ]] || fatal "Invalid HEALTH_INTERVAL: $HEALTH_INTERVAL"
-cat > /etc/systemd/system/reload.timer <<EOF
-[Unit]
-Description=Automatic Smart Proxy Reload
-After=network-online.target
-Wants=network-online.target
+# Render timer interval from defaults.conf (single source of truth).
+/opt/smart-proxy/lib/timer.sh
 
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec=${HEALTH_INTERVAL}
-AccuracySec=1s
-Unit=reload.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-systemctl daemon-reload
 systemctl disable --now proxy-rearm.timer 2>/dev/null || true
 systemctl disable --now rearm.timer 2>/dev/null || true
 systemctl enable --now sing-box
