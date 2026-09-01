@@ -69,9 +69,7 @@ rm -f /etc/sing-box/config.json
 systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
 
-chmod +x lib/timer.sh
-chmod +x lib/race.sh
-chmod +x lib/test.sh
+chmod +x lib/timer.sh lib/race.sh lib/health.sh lib/score.sh lib/generator.sh lib/hysteresis.sh
 
 ./lib/timer.sh
 
@@ -83,7 +81,7 @@ systemctl enable --now reload.timer
 if ./lib/race.sh; then
   sing-box check -c /etc/sing-box/config.json || fatal "Generated sing-box configuration is invalid."
 else
-  fatal "At least one valid profile is required for initial installation."
+  fatal "Initial race failed. See /var/log/smartproxy/proxy.log for the exact profile/health error."
 fi
 
 success "${PROJECT} v${VERSION} installation completed."
