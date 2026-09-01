@@ -69,7 +69,10 @@ rm -f /etc/sing-box/config.json
 systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
 
-# Runtime and systemd use the repository checkout directly.
+chmod +x /lib/timer.sh
+chmod +x /lib/race.sh
+chmod +x /lib/test.sh
+
 ./lib/timer.sh
 
 systemctl disable --now proxy-rearm.timer 2>/dev/null || true
