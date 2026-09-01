@@ -390,7 +390,7 @@ sing-box.service
 
 The automatic race is driven by systemd.
 
-The timer reads `HEALTH_INTERVAL` from configuration.
+The source value is `HEALTH_INTERVAL` in `config/defaults.conf`.
 
 Example:
 
@@ -398,7 +398,7 @@ Example:
 HEALTH_INTERVAL=1h
 ```
 
-The installer renders the real systemd timer from this value.
+`lib/timer.sh` synchronizes this value into the installed systemd timer as `OnUnitActiveSec`. This keeps the configuration and timer aligned without maintaining a second interval value.
 
 Initial boot execution is configured with a short boot delay, followed by the recurring health/race interval.
 
@@ -407,6 +407,12 @@ Check the timer:
 ```bash
 systemctl status reload.timer
 systemctl list-timers --all | grep reload
+```
+
+Re-sync the timer after changing `HEALTH_INTERVAL`:
+
+```bash
+sudo bash lib/timer.sh
 ```
 
 Run one race immediately:
@@ -472,7 +478,16 @@ cd Smart-Proxy-Server
 sudo bash install.sh
 ```
 
-The installer prepares sing-box, runtime directories, profile files, systemd units and the automatic reload timer.
+The repository checkout is the project source and runtime working tree. Installation does **not** create a duplicate `/opt/smart-proxy` project tree.
+
+Runtime configuration, state, profiles, logs and systemd units are kept in their dedicated system locations:
+
+```text
+/etc/sing-box/
+/var/log/smartproxy/
+/etc/systemd/system/
+/run/smartproxy/
+```
 
 ---
 
@@ -483,12 +498,13 @@ cd Smart-Proxy-Server
 git pull
 ```
 
-After changing systemd units manually:
+After updating systemd units or installation logic:
 
 ```bash
-sudo cp systemd/reload.service /etc/systemd/system/reload.service
-sudo systemctl daemon-reload
+sudo bash install.sh
 ```
+
+This keeps the repository checkout and installed system components synchronized.
 
 ---
 
@@ -510,6 +526,18 @@ Run the complete report and race:
 
 ```bash
 bash reload.sh
+```
+
+Validate timer synchronization:
+
+```bash
+bash lib/timer.sh
+```
+
+Run the full diagnostic suite:
+
+```bash
+bash test.sh
 ```
 
 Inspect the current state:
@@ -626,7 +654,8 @@ Smart-Proxy-Server
 │   ├── score.sh
 │   ├── hysteresis.sh
 │   ├── generator.sh
-│   └── race.sh
+│   ├── race.sh
+│   └── timer.sh
 │
 ├── profiles/
 │   ├── 01_Nova_443.txt
@@ -644,6 +673,18 @@ Smart-Proxy-Server
 ├── uninstall.sh
 └── README.md
 ```
+
+### Runtime layout
+
+```text
+/root/Smart-Proxy-Server     ← source + runtime working tree
+/etc/sing-box/               ← installed configuration + state + profiles
+/var/log/smartproxy/         ← logs
+/run/smartproxy/             ← temporary race data
+/etc/systemd/system/         ← systemd units
+```
+
+There is intentionally no second project copy under `/opt`.
 
 ---
 
@@ -684,6 +725,8 @@ Just profiles, measurements, smart selection and sing-box.
 - [x] gRPC support
 - [x] Terminal race report
 - [x] systemd journal report
+- [x] Configuration-driven systemd timer
+- [x] Single repository/runtime tree
 - [ ] Full end-to-end proxy health probing
 - [ ] Historical performance statistics
 - [ ] Web dashboard
@@ -708,12 +751,6 @@ Apache 2.0 License
 
 <div align="center">
 
-### Designed for Orange Pi, Raspberry Pi and Every Debian Server
-
-Made with ❤️ by **AmirShams-ir**
-
-**Smart Gateway • Smart DNS • Smart Proxy**
-
-⭐ Don't forget to Star this project!
+❤️ Built for lightweight, intelligent proxy gateways.
 
 </div>
