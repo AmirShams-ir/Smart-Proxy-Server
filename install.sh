@@ -69,7 +69,8 @@ rm -f /etc/sing-box/config.json
 systemctl stop sing-box 2>/dev/null || true
 systemctl daemon-reload
 
-chmod +x lib/timer.sh lib/race.sh lib/health.sh lib/score.sh lib/generator.sh lib/hysteresis.sh
+chmod +x lib/*.sh
+chmod +x reload.sh test.sh
 
 ./lib/timer.sh
 
@@ -78,8 +79,6 @@ systemctl disable --now rearm.timer 2>/dev/null || true
 systemctl enable --now sing-box
 systemctl enable --now reload.timer
 
-# Run the same full race/report used by normal reloads so the installer shows
-# health metrics, scoring, ranking and the selected active profile.
 if ./reload.sh; then
   sing-box check -c /etc/sing-box/config.json || fatal "Generated sing-box configuration is invalid."
 else
