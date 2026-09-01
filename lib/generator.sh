@@ -70,12 +70,25 @@ if tls_enabled:
     ob['tls'] = tls
 
 if transport == 'ws':
-    tr = {"type": "ws", "path": unquote(first('path', '/'))}
+    raw_path = unquote(first('path', '/'))
+
+    # VLESS/WS providers may encode WebSocket Early Data as ?ed=<bytes>
+    # inside the URI path value. sing-box expects this as transport fields,
+    # not as part of the actual WebSocket path.
+    early_data = None
+    if '?ed=' in raw_path:
+        raw_path, ed = raw_path.rsplit('?ed=', 1)
+        try:
+            early_data = int(ed)
+        except ValueError:
+            early_data = None
+
+    tr = {"type": "ws", "path": raw_path}
     host = first('host')
     if host:
         tr['headers'] = {"Host": host}
-    if first('ed'):
-        tr['max_early_data'] = int(first('ed'))
+    if early_data is not None:
+        tr['max_early_data'] = early_data
         tr['early_data_header_name'] = first('ehn', 'Sec-WebSocket-Protocol')
     ob['transport'] = tr
 elif transport == 'grpc':
