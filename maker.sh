@@ -6,15 +6,14 @@ set -Eeuo pipefail
 # Stage 2 of the Intelligence Proxy Engine.
 #
 # Input:
-#   templates/*.conf  - [worker] + protocol sections ([vless], [trojan])
+#   templates/*.conf  - [worker] + [vless] + [trojan]
 #   cache/edges.csv   - scanner output containing ONLY an `ip` column
 #
 # Output:
 #   cache/generated/*.json
 #
-# The maker expands only protocol-local combinations. VLESS and Trojan no
-# longer share transport/path/security values, preventing invalid cross-product
-# candidates.
+# The maker expands only protocol-local combinations. It performs no network
+# tests and never benchmarks traffic.
 # ==============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,11 +54,8 @@ OUTPUT_DIR = Path(sys.argv[3])
 BOOLS = {"true": True, "false": False}
 
 
-def split_values(value: str, keep_empty: bool = False):
-    parts = [x.strip() for x in value.split(',')]
-    if keep_empty:
-        return parts if parts else ['']
-    return [x for x in parts if x]
+def split_values(value: str):
+    return [x.strip() for x in value.split(',') if x.strip()]
 
 
 def get(cfg, key, default=""):
@@ -73,7 +69,7 @@ def bool_value(v, default=False):
 def load_template(path: Path):
     sections = {}
     section = None
-    for raw in path.read_text(encoding='utf-8').splitlines():
+    for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith('#') or line.startswith(';'):
             continue
@@ -114,9 +110,9 @@ def tls_block(cfg, security):
     sni = get(cfg, 'SNI') or get(cfg, 'Host')
     if sni:
         tls['server_name'] = sni
-    fp = get(cfg, 'Fingerprint')
-    if fp:
-        tls['utls'] = {'enabled': True, 'fingerprint': fp}
+    fingerprint = get(cfg, 'Fingerprint')
+    if fingerprint:
+        tls['utls'] = {'enabled': True, 'fingerprint': fingerprint}
     alpn = split_values(get(cfg, 'ALPN'))
     if alpn:
         tls['alpn'] = alpn
@@ -128,18 +124,21 @@ def transport_block(cfg, transport):
     if transport == 'tcp':
         return None
     if transport == 'ws':
+        path = split_values(get(cfg, 'WSPath'))
+        host = split_values(get(cfg, 'WSHost'))
         out = {'type': 'ws'}
-        paths = split_values(get(cfg, 'WSPath'))
-        hosts = split_values(get(cfg, 'WSHost'))
-        if paths:
-            out['path'] = paths[0]
-        host = hosts[0] if hosts else get(cfg, 'Host')
+        if path:
+            out['path'] = path[0]
         if host:
-            out['headers'] = {'Host': host}
+            out['headers'] = {'Host': host[0]}
+        else:
+            worker_host = get(cfg, 'Host')
+            if worker_host:
+                out['headers'] = {'Host': worker_host}
         return out
     if transport == 'grpc':
-        out = {'type': 'grpc'}
         names = split_values(get(cfg, 'GRPCServiceName'))
+        out = {'type': 'grpc'}
         if names:
             out['service_name'] = names[0]
         return out
@@ -171,7 +170,7 @@ def make_vless(cfg, edge, port, transport, security):
 
 
 def make_trojan(cfg, edge, port, transport, security):
-    password = get(cfg, 'Password')
+    password = get(cfg, 'Password') or get(cfg, 'TrojanPassword')
     if not password:
         return None
     out = {
@@ -190,11 +189,6 @@ def make_trojan(cfg, edge, port, transport, security):
         out['transport'] = tr
     return out
 
-
-PROTOCOL_BUILDERS = {
-    'vless': make_vless,
-    'trojan': make_trojan,
-}
 
 edges = load_edges()
 if not edges:
@@ -221,8 +215,7 @@ for tpl in templates:
             if 1 <= port <= 65535 and port not in ports:
                 ports.append(port)
         except ValueError:
-            pass
-
+            continue
     if not ports:
         warning(f'{tpl.name}: no valid Ports; skipped')
         continue
@@ -241,48 +234,45 @@ for tpl in templates:
     info_text = []
 
     for proto, cfg in protocol_sections:
-        transports = split_values(get(cfg, 'Transport'))
-        securities = split_values(get(cfg, 'Security'))
-        transports = list(dict.fromkeys(t.lower() for t in transports if t.lower() in {'tcp','ws','grpc'}))
-        securities = list(dict.fromkeys(s.lower() for s in securities if s.lower() in {'tls','none'}))
+        transports = list(dict.fromkeys(t.lower() for t in split_values(get(cfg, 'Transport')) if t.lower() in {'tcp', 'ws', 'grpc'}))
+        securities = list(dict.fromkeys(s.lower() for s in split_values(get(cfg, 'Security')) if s.lower() in {'tls', 'none'}))
 
         if not transports or not securities:
             warning(f'{tpl.name} [{proto}]: no valid Transport/Security; skipped')
             continue
 
-        # Security/transport are evaluated only inside this protocol section.
         candidates = 0
         skipped_credential = 0
+        skipped_invalid = 0
 
         for edge, port, transport, security in itertools.product(edges, ports, transports, securities):
-            builder = PROTOCOL_BUILDERS[proto]
-            # Trojan currently requires TLS in the shared CF-edge worker model.
             if proto == 'trojan' and security != 'tls':
+                skipped_invalid += 1
                 continue
-            outbound = builder(cfg | worker, edge, port, transport, security)
+
+            if transport == 'ws' and not split_values(get(cfg, 'WSPath')):
+                skipped_invalid += 1
+                continue
+            if transport == 'grpc' and not split_values(get(cfg, 'GRPCServiceName')):
+                skipped_invalid += 1
+                continue
+
+            outbound = make_vless(cfg, edge, port, transport, security) if proto == 'vless' else make_trojan(cfg, edge, port, transport, security)
             if outbound is None:
                 skipped_credential += 1
                 continue
 
-            # A WS-specific path must exist when WS is selected.
-            if transport == 'ws' and not split_values(get(cfg, 'WSPath')):
-                continue
-            if transport == 'grpc' and not split_values(get(cfg, 'GRPCServiceName')):
-                # gRPC service name is required for our worker template model.
-                continue
-
-            safe = re.sub(r'[^A-Za-z0-9._-]+', '_', str(edge).replace(':','_'))
+            safe = re.sub(r'[^A-Za-z0-9._-]+', '_', str(edge).replace(':', '_'))
             filename = f"{name}_{proto}_{safe}_{port}_{transport}_{security}.json"
-            (OUTPUT_DIR / filename).write_text(
-                json.dumps(outbound, indent=2, ensure_ascii=False) + '\n',
-                encoding='utf-8'
-            )
+            (OUTPUT_DIR / filename).write_text(json.dumps(outbound, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
             created += 1
             candidates += 1
 
         info_text.append(f'{proto}={candidates}')
         if skipped_credential:
-            warning(f'{tpl.name} [{proto}]: skipped {skipped_credential} candidates (missing credential)')
+            print(f'[!] {tpl.name} [{proto}]: skipped {skipped_credential} candidates (missing credential)', file=sys.stderr)
+        if skipped_invalid:
+            print(f'[!] {tpl.name} [{proto}]: skipped {skipped_invalid} unsupported/missing protocol-local parameters', file=sys.stderr)
 
     info(f'{tpl.name}: ' + ', '.join(info_text) if info_text else f'{tpl.name}: no candidates')
 
