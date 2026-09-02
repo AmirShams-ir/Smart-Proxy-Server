@@ -8,7 +8,7 @@ set -Eeuo pipefail
 #
 # Reads Cloudflare ASN/CIDR source files, generates real host addresses, probes
 # them quickly and writes ONLY the selected IP addresses to cache/edges.csv.
-# No proxy protocol/configuration is handled here.
+# The console report retains RTT, jitter, loss, colo and score for debugging.
 # ==============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,7 +75,7 @@ read_cidrs() {
 
 # Generate valid host IPs only. For IPv4, network and broadcast addresses are
 # always excluded when the subnet has usable hosts. Several deterministic sample
-# points are generated from every sufficiently large CIDR, giving diversity.
+# points are generated from every sufficiently large CIDR.
 build_targets() {
     local src="$1" dst="$2"
     python3 - "$src" "$dst" "$MAX_PROBES" <<'PY'
@@ -100,14 +100,12 @@ for cidr in cidrs:
             offsets = [0, 1]
         else:
             usable = net.num_addresses - 2
-            # Avoid edge-of-range addresses and use multiple spread-out samples.
             raw = hashlib.sha256(cidr.encode()).digest()
             seed = int.from_bytes(raw[:8], "big")
             points = 8 if usable >= 8 else usable
             offsets = []
             for i in range(points):
                 base = 1 + ((i + 1) * usable // (points + 1))
-                # Small deterministic perturbation while staying inside hosts.
                 jitter = ((seed >> ((i % 8) * 8)) & 0xFF) % max(1, usable // 32)
                 off = min(usable, max(1, base + jitter - (jitter // 2)))
                 offsets.append(off)
@@ -128,7 +126,6 @@ for cidr in cidrs:
             seen.add(key)
             targets.append((key, str(net), f"IPv{net.version}"))
 
-# Stable shuffle makes runs different across CIDRs while remaining deterministic.
 targets.sort(key=lambda x: hashlib.sha256((x[1] + "|" + x[0]).encode()).hexdigest())
 
 with open(dst, "w", encoding="utf-8") as fh:
@@ -137,8 +134,8 @@ with open(dst, "w", encoding="utf-8") as fh:
 PY
 }
 
-# Return avg_rtt|jitter|loss. ICMP is used only as a cheap discovery signal;
-# the next validator stage will perform protocol-specific connectivity tests.
+# Return avg_rtt|jitter|loss. ICMP is only a cheap discovery signal;
+# validator.sh will perform protocol-specific connectivity tests later.
 probe_ip() {
     local ip="$1"
     local family="-4"
@@ -166,8 +163,6 @@ probe_ip() {
     printf '%s|%s|%s\n' "$avg" "$mdev" "$loss"
 }
 
-# Cloudflare trace is best-effort. It is NOT required for a candidate to survive.
-# A missing colo gets a neutral score so geography never defeats good latency.
 probe_colo() {
     local ip="$1"
     local url='https://www.cloudflare.com/cdn-cgi/trace'
@@ -217,6 +212,9 @@ require_cmd timeout
 require_cmd curl
 require_cmd mktemp
 require_cmd wc
+
+grep_cmd='grep'
+require_cmd "$grep_cmd"
 
 is_uint "$TOP_N"      || fatal "EDGE_TOP_N must be a positive integer"
 is_uint "$MAX_PROBES" || fatal "EDGE_MAX_PROBES must be a positive integer"
@@ -270,7 +268,9 @@ while IFS='|' read -r ip cidr family; do
         colo="$(probe_colo "$ip")"
         [[ -n "$colo" ]] || colo="UNKNOWN"
         score="$(score_candidate "$rtt" "$jitter" "$loss" "$colo")"
-        printf '%s|%s|%s\n' "$ip" "$score" "$colo" >> "${TMP_DIR}/result.${shard}"
+        printf '%s|%s|%s|%s|%s|%s|%s\n' \
+            "$ip" "$family" "$colo" "$rtt" "$jitter" "$loss" "$score" \
+            >> "${TMP_DIR}/result.${shard}"
     ) &
 
     if (( job % WORKERS == 0 )); then
@@ -280,24 +280,44 @@ done < "$TARGET_FILE"
 wait || true
 
 cat "${TMP_DIR}"/result.* 2>/dev/null |
-    sort -t'|' -k2,2nr -k1,1 > "$RESULTS_FILE" || true
+    sort -t'|' -k7,7nr -k4,4n -k5,5n -k6,6n > "$RESULTS_FILE" || true
 
 TOTAL_VALID="$(wc -l < "$RESULTS_FILE" | tr -d ' ')"
-(( TOTAL_VALID > 0 )) || fatal "No edge survived strict thresholds (RTT<=${MAX_RTT}ms, jitter<=${MAX_JITTER}ms, loss<=${MAX_LOSS}%)."
+(( TOTAL_VALID > 0 )) || fatal \
+    "No edge survived strict thresholds (RTT<=${MAX_RTT}ms, jitter<=${MAX_JITTER}ms, loss<=${MAX_LOSS}%)."
 
-# One row per IP, then top N. The scanner output intentionally contains only IPs.
 awk -F'|' '!seen[$1]++' "$RESULTS_FILE" | head -n "$TOP_N" > "$DEDUP_FILE"
-SELECTED="$(wc -l < "$DEDUP_FILE" | tr -d ' ')"
 
-# The scanner contract is exactly one column: ip.
+###############################################################################
+# Console report: full scanner metrics remain visible for debugging.
+###############################################################################
+printf '\n'
+printf '%-5s %-40s %-7s %-9s %-10s %-8s %-8s\n' \
+    "Rank" "IP" "Colo" "RTT" "Jitter" "Loss" "Score"
+printf '%s\n' '----------------------------------------------------------------------------------------------------------'
+
+rank=0
+while IFS='|' read -r ip family colo rtt jitter loss score; do
+    rank=$((rank + 1))
+    printf '%-5s %-40s %-7s %-9sms %-10sms %-8s %-8s\n' \
+        "$rank" "$ip" "$colo" "$rtt" "$jitter" "$loss%" "$score"
+done < "$DEDUP_FILE"
+
+printf '%s\n' '----------------------------------------------------------------------------------------------------------'
+
+###############################################################################
+# Output contract for maker.sh: IP addresses only.
+###############################################################################
 TMP_OUTPUT="${OUTPUT_FILE}.tmp"
 printf 'ip\n' > "$TMP_OUTPUT"
-while IFS='|' read -r ip score colo; do
-    printf '%s\n' "$ip" >> "$TMP_OUTPUT"
-done < "$DEDUP_FILE"
+awk -F'|' '{print $1}' "$DEDUP_FILE" >> "$TMP_OUTPUT"
 mv "$TMP_OUTPUT" "$OUTPUT_FILE"
 
-success "Scanner complete: ${SELECTED} best edges written to ${OUTPUT_FILE}"
-printf '\n%-5s %-40s\n' "Rank" "IP"
-printf '%s\n' '--------------------------------------------------'
-awk 'NR>1{printf "%-5s %-40s\n",NR-1,$1}' "$OUTPUT_FILE"
+if (( rank == TOP_N )); then
+    success "Scanner complete: ${rank} best edges written to ${OUTPUT_FILE}"
+else
+    warning "Scanner complete: only ${rank}/${TOP_N} edges survived strict thresholds."
+fi
+printf '\n'
+printf '[*] Output: %s\n' "$OUTPUT_FILE"
+cat "$OUTPUT_FILE"
