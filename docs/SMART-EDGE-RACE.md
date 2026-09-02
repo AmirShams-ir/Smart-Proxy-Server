@@ -1,54 +1,52 @@
 # Smart Edge Race
 
-Smart Edge Race is an edge-discovery layer for Smart Proxy Server. It is intentionally separate from the existing Health/Score/Race pipeline.
-
-## Goal
-
-A proxy profile is treated as a template. The engine can discover candidate Cloudflare IPv4 edges and rank them before deeper proxy validation.
+Smart Edge Race is a staged Cloudflare edge selection layer for Smart Proxy Server.
 
 ## Pipeline
 
 ```text
-Cloudflare CIDRs
+Profile template
       |
       v
-Random edge sampling
+Phase 1: Edge Discovery
+Cloudflare IPv4 CIDRs -> TCP candidates on the profile port
       |
       v
-TCP/RTT/Jitter/Loss filter
+Phase 2: Edge Verification
+Top candidates -> TLS verification (or TCP for HTTP endpoints)
       |
       v
-Top edge candidates
+Phase 3: Real Proxy Probe
+VLESS/Trojan + original SNI/Host/WS/gRPC -> SOCKS -> HTTPS 204
       |
       v
-Future: real VLESS/Trojan validation
-      |
-      v
-Future: download/upload benchmark
-      |
-      v
-Best edge per profile/worker
+Phase 4: Smart Score
+Real proxy latency + verification latency + edge RTT -> Top winners
 ```
 
-## Important design rule
+## Design rules
 
-Do not run a full VLESS/Trojan validation against every Cloudflare address. Discovery should be broad and cheap; application-layer proxy validation should be narrow and expensive.
+1. The endpoint port comes from the profile. Discovery does not scan all Cloudflare ports for every profile.
+2. The original profile remains a template. During probing only the connect address is changed to a candidate IP; credentials, SNI, Host and transport settings remain tied to the profile.
+3. Cheap network filtering happens before expensive real-proxy probing.
+4. A candidate that fails the real proxy probe cannot become a winner.
+5. Each phase writes inspectable JSON so debugging does not require running the full pipeline repeatedly.
 
-## Current implementation
-
-`lib/edge-race.sh` samples IPv4 addresses from `config/cloudflare-ips-v4.txt`, tests candidate ports, computes a lightweight score from RTT, jitter, packet loss and TCP timing, and stores the top candidates in:
+## Cache files
 
 ```text
-/var/lib/smartproxy/edge-cache.json
+cache/candidates.json
+cache/verified.json
+cache/probed.json
+cache/winners.json
 ```
 
-The profile's original URI remains the source of truth. The current implementation does not yet modify the production active profile automatically. This keeps the feature safe while the real proxy validation stage is developed.
+Runtime deployments may override these with `/var/lib/smartproxy/*.json` through `config/defaults.conf`.
 
-## Recommended next phase
+## Sources
 
-1. Parse a profile into a reusable template.
-2. Substitute only the connect address while preserving SNI, Host, Path and credentials.
-3. Validate the candidate with the real sing-box/VLESS/Trojan transport.
-4. Speed-test only the top candidates.
-5. Persist the best edge per worker/profile.
-6. Integrate the result into the existing Race Engine with hysteresis and cooldown.
+The repository contains the official Cloudflare IPv4 CIDR source in `config/cf-ipv4.txt` and an AS13335 metadata file in `config/cf-asn13335.txt`. ASN-backed synchronization can be added later without changing the pipeline.
+
+## Safety / rollout
+
+The edge pipeline is currently opt-in and separate from the production `reload.sh` / `race.sh` selection flow. Dynamic Edge rewriting should be enabled only after field testing across the supported VLESS/Trojan profile families.
