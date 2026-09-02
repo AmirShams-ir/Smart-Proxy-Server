@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smart Proxy Server - Edge Discovery
+# Smart Proxy Server - Edge Scanner
 set -Eeuo pipefail
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$BASE_DIR/config/defaults.conf"
