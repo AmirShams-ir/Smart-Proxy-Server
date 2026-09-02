@@ -3,19 +3,19 @@ set -Eeuo pipefail
 
 # ==============================================================================
 # Smart Proxy Server - Proxy Maker
-# ------------------------------------------------------------------------------
 # Stage 2 of the Intelligence Proxy Engine.
 #
 # Input:
-#   templates/*.conf  - one template per Worker
+#   templates/*.conf  - [worker] + protocol sections ([vless], [trojan])
 #   cache/edges.csv   - scanner output containing ONLY an `ip` column
 #
 # Output:
 #   cache/generated/*.json
 #
-# The maker does not test connectivity and does not benchmark traffic. It only
-# expands Worker templates into valid sing-box outbound JSON candidates.
-# ============================================================================== 
+# The maker expands only protocol-local combinations. VLESS and Trojan no
+# longer share transport/path/security values, preventing invalid cross-product
+# candidates.
+# ==============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="${BASE_DIR}/templates"
@@ -31,8 +31,7 @@ require_cmd(){ command -v "$1" >/dev/null 2>&1 || fatal "Required command not fo
 
 require_cmd python3
 require_cmd find
-require_cmd sort
-require_cmd mktemp
+require_cmd wc
 
 [[ -d "$TEMPLATE_DIR" ]] || fatal "Missing template directory: $TEMPLATE_DIR"
 [[ -f "$EDGE_FILE" ]] || fatal "Missing scanner output: $EDGE_FILE"
@@ -43,6 +42,7 @@ mkdir -p "$OUTPUT_DIR"
 python3 - "$TEMPLATE_DIR" "$EDGE_FILE" "$OUTPUT_DIR" <<'PY'
 import csv
 import itertools
+import ipaddress
 import json
 import re
 import sys
@@ -54,19 +54,12 @@ OUTPUT_DIR = Path(sys.argv[3])
 
 BOOLS = {"true": True, "false": False}
 
-# sing-box current outbound protocol names relevant to this maker. The official
-# outbound list includes vless, vmess, trojan, shadowsocks, tuic, hysteria2,
-# shadowtls, anytls, snell and naive among others.
-SUPPORTED_TYPES = {
-    "vless", "vmess", "trojan", "shadowsocks", "tuic", "hysteria2",
-    "shadowtls", "anytls", "snell", "naive"
-}
 
-TRANSPORTS = {"tcp", "ws", "grpc", "http", "httpupgrade", "quic"}
-
-
-def split_values(value: str):
-    return [x.strip() for x in value.split(',') if x.strip()]
+def split_values(value: str, keep_empty: bool = False):
+    parts = [x.strip() for x in value.split(',')]
+    if keep_empty:
+        return parts if parts else ['']
+    return [x for x in parts if x]
 
 
 def get(cfg, key, default=""):
@@ -74,36 +67,26 @@ def get(cfg, key, default=""):
 
 
 def bool_value(v, default=False):
-    x = v.strip().lower()
-    if x in BOOLS:
-        return BOOLS[x]
-    return default
-
-
-def int_value(v, default=0):
-    try:
-        return int(v.strip())
-    except Exception:
-        return default
+    return BOOLS.get(v.strip().lower(), default)
 
 
 def load_template(path: Path):
-    cfg = {}
-    section = ""
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    sections = {}
+    section = None
+    for raw in path.read_text(encoding='utf-8').splitlines():
         line = raw.strip()
-        if not line or line.startswith('#'):
+        if not line or line.startswith('#') or line.startswith(';'):
             continue
         m = re.fullmatch(r'\[([^]]+)\]', line)
         if m:
             section = m.group(1).strip().lower()
+            sections.setdefault(section, {})
             continue
-        if '=' not in line:
+        if '=' not in line or section is None:
             continue
-        k, v = line.split('=', 1)
-        key = k.strip()
-        cfg[key] = v.strip()
-    return cfg
+        key, value = line.split('=', 1)
+        sections[section][key.strip()] = value.strip()
+    return sections
 
 
 def load_edges():
@@ -113,182 +96,105 @@ def load_edges():
         if 'ip' not in (reader.fieldnames or []):
             raise ValueError('cache/edges.csv must contain an `ip` column')
         for row in reader:
-            ip = (row.get('ip') or '').strip()
-            if not ip:
+            raw = (row.get('ip') or '').strip()
+            if not raw:
                 continue
-            # The scanner produces IPv4/IPv6 literals. Do not accept arbitrary
-            # strings because they would later become invalid sing-box servers.
-            import ipaddress
             try:
-                ipaddress.ip_address(ip)
+                ipaddress.ip_address(raw)
             except ValueError:
                 continue
-            ips.append(ip)
+            ips.append(raw)
     return list(dict.fromkeys(ips))
 
 
-def tls_block(cfg):
-    security = get(cfg, 'Security').lower()
-    if security not in ('tls', 'reality'):
+def tls_block(cfg, security):
+    if security != 'tls':
         return None
-    tls = {"enabled": True}
+    tls = {'enabled': True}
     sni = get(cfg, 'SNI') or get(cfg, 'Host')
     if sni:
         tls['server_name'] = sni
     fp = get(cfg, 'Fingerprint')
     if fp:
-        tls['utls'] = {"enabled": True, "fingerprint": fp}
+        tls['utls'] = {'enabled': True, 'fingerprint': fp}
     alpn = split_values(get(cfg, 'ALPN'))
     if alpn:
         tls['alpn'] = alpn
     tls['insecure'] = bool_value(get(cfg, 'AllowInsecure'), False)
-    if security == 'reality':
-        reality = {}
-        reality_cfg = get(cfg, 'RealityPublicKey')
-        reality_short = get(cfg, 'RealityShortID')
-        reality_server = get(cfg, 'RealityServerName')
-        if reality_cfg:
-            reality['public_key'] = reality_cfg
-        if reality_short:
-            reality['short_id'] = reality_short
-        if reality_server:
-            reality['server_name'] = reality_server
-        if reality:
-            tls['reality'] = reality
     return tls
 
 
 def transport_block(cfg, transport):
-    t = transport.lower()
-    if t == 'tcp':
+    if transport == 'tcp':
         return None
-    if t == 'ws':
-        out = {"type": "ws"}
-        path = get(cfg, 'WSPath')
-        host = get(cfg, 'WSHost') or get(cfg, 'Host')
-        if path:
-            out['path'] = split_values(path)[0]
+    if transport == 'ws':
+        out = {'type': 'ws'}
+        paths = split_values(get(cfg, 'WSPath'))
+        hosts = split_values(get(cfg, 'WSHost'))
+        if paths:
+            out['path'] = paths[0]
+        host = hosts[0] if hosts else get(cfg, 'Host')
         if host:
-            out['headers'] = {"Host": split_values(host)[0]}
+            out['headers'] = {'Host': host}
         return out
-    if t == 'grpc':
-        name = get(cfg, 'GRPCServiceName')
-        out = {"type": "grpc"}
-        if name:
-            out['service_name'] = split_values(name)[0]
+    if transport == 'grpc':
+        out = {'type': 'grpc'}
+        names = split_values(get(cfg, 'GRPCServiceName'))
+        if names:
+            out['service_name'] = names[0]
         return out
-    if t == 'http':
-        out = {"type": "http"}
-        host = get(cfg, 'HTTPHost') or get(cfg, 'Host')
-        path = get(cfg, 'HTTPPath')
-        if host:
-            out['host'] = split_values(host)
-        if path:
-            out['path'] = split_values(path)[0]
-        return out
-    if t == 'httpupgrade':
-        out = {"type": "httpupgrade"}
-        host = get(cfg, 'HTTPUpgradeHost') or get(cfg, 'Host')
-        path = get(cfg, 'HTTPUpgradePath')
-        if host:
-            out['host'] = split_values(host)[0]
-        if path:
-            out['path'] = split_values(path)[0]
-        return out
-    if t == 'quic':
-        return {"type": "quic"}
     raise ValueError(f'Unsupported transport: {transport}')
 
 
-def dial_fields(cfg):
-    # Keep the maker deliberately conservative. Extra dial fields can be added
-    # later without changing the scanner/validator contract.
-    detour = get(cfg, 'Detour')
-    return ({"detour": detour} if detour else {})
-
-
-def make_outbound(cfg, protocol, edge, port, transport, security, flow):
-    host = get(cfg, 'Host')
+def make_vless(cfg, edge, port, transport, security):
     uuid = get(cfg, 'UUID')
-    sni = get(cfg, 'SNI') or host
-    tag = f"{get(cfg,'Name') or 'worker'}-{protocol}-{edge.replace(':','_')}-{port}-{transport}-{security}"
-
+    if not uuid:
+        return None
     out = {
-        "type": protocol,
-        "tag": tag,
-        "server": edge,
-        "server_port": port,
+        'type': 'vless',
+        'tag': f"{get(cfg,'Name') or 'worker'}-vless-{edge.replace(':','_')}-{port}-{transport}-{security}",
+        'server': edge,
+        'server_port': port,
+        'uuid': uuid,
+        'network': transport,
     }
-
-    if protocol in {'vless', 'vmess', 'tuic'} and uuid:
-        out['uuid'] = uuid
-    if protocol == 'vless' and flow:
+    flow = get(cfg, 'Flow')
+    if flow:
         out['flow'] = flow
-    if protocol == 'trojan':
-        password = get(cfg, 'TrojanPassword') or get(cfg, 'Password')
-        if password:
-            out['password'] = password
-    if protocol == 'vmess':
-        out['security'] = get(cfg, 'VMessSecurity') or 'auto'
-        out['alter_id'] = int_value(get(cfg, 'VMessAlterID'), 0)
-        out['global_padding'] = bool_value(get(cfg, 'VMessGlobalPadding'), False)
-        out['authenticated_length'] = bool_value(get(cfg, 'VMessAuthenticatedLength'), True)
-    if protocol == 'shadowsocks':
-        method = get(cfg, 'SSMethod')
-        password = get(cfg, 'SSPassword') or get(cfg, 'Password')
-        if method: out['method'] = method
-        if password: out['password'] = password
-        plugin = get(cfg, 'SSPlugin')
-        if plugin:
-            out['plugin'] = plugin
-            opts = get(cfg, 'SSPluginOpts')
-            if opts: out['plugin_opts'] = opts
-    if protocol == 'tuic':
-        password = get(cfg, 'TUICPassword') or get(cfg, 'Password')
-        if password: out['password'] = password
-        out['congestion_control'] = split_values(get(cfg, 'TUICCongestionControl'))[:1][0] if get(cfg, 'TUICCongestionControl') else 'cubic'
-        out['udp_relay_mode'] = split_values(get(cfg, 'TUICUDPRelayMode'))[:1][0] if get(cfg, 'TUICUDPRelayMode') else 'native'
-        out['udp_over_stream'] = bool_value(get(cfg, 'TUICUDPOverStream'), False)
-        out['zero_rtt_handshake'] = bool_value(get(cfg, 'TUICZeroRTT'), False)
-        heartbeat = get(cfg, 'TUICHeartbeat')
-        if heartbeat: out['heartbeat'] = heartbeat
-    if protocol == 'hysteria2':
-        password = get(cfg, 'Hysteria2Password') or get(cfg, 'Password')
-        if password: out['password'] = password
-        out['up_mbps'] = int_value(get(cfg, 'Hysteria2UpMbps'), 100)
-        out['down_mbps'] = int_value(get(cfg, 'Hysteria2DownMbps'), 100)
-        obfs_type = get(cfg, 'Hysteria2ObfsType')
-        obfs_password = get(cfg, 'Hysteria2ObfsPassword')
-        if obfs_type:
-            obfs = {"type": obfs_type}
-            if obfs_password: obfs['password'] = obfs_password
-            out['obfs'] = obfs
-
-    network = transport if transport in {'tcp', 'ws', 'grpc', 'http', 'httpupgrade', 'quic'} else None
-    if protocol in {'vless', 'vmess', 'trojan', 'shadowsocks', 'tuic', 'hysteria2'} and network:
-        # sing-box's protocol-specific fields use network where applicable.
-        if protocol not in {'tuic', 'hysteria2'} or network in {'tcp', 'quic'}:
-            out['network'] = network
-
-    tls = tls_block({**cfg, 'Security': security, 'SNI': sni})
+    tls = tls_block(cfg, security)
     if tls:
         out['tls'] = tls
-
     tr = transport_block(cfg, transport)
     if tr:
         out['transport'] = tr
-
-    pe = get(cfg, 'PacketEncoding')
-    if pe and protocol in {'vless', 'vmess'}:
-        out['packet_encoding'] = pe
-
-    multiplex = get(cfg, 'Multiplex')
-    if bool_value(multiplex, False):
-        out['multiplex'] = {"enabled": True}
-
-    out.update(dial_fields(cfg))
     return out
 
+
+def make_trojan(cfg, edge, port, transport, security):
+    password = get(cfg, 'Password')
+    if not password:
+        return None
+    out = {
+        'type': 'trojan',
+        'tag': f"{get(cfg,'Name') or 'worker'}-trojan-{edge.replace(':','_')}-{port}-{transport}-{security}",
+        'server': edge,
+        'server_port': port,
+        'password': password,
+        'network': transport,
+    }
+    tls = tls_block(cfg, security)
+    if tls:
+        out['tls'] = tls
+    tr = transport_block(cfg, transport)
+    if tr:
+        out['transport'] = tr
+    return out
+
+
+PROTOCOL_BUILDERS = {
+    'vless': make_vless,
+    'trojan': make_trojan,
+}
 
 edges = load_edges()
 if not edges:
@@ -298,71 +204,95 @@ templates = sorted(TEMPLATE_DIR.glob('worker*.conf'))
 if not templates:
     templates = sorted(TEMPLATE_DIR.glob('*.conf'))
 if not templates:
-    raise SystemExit(f'No templates found in {TEMPLATE_DIR}')
+    raise SystemExit(f'No worker templates found in {TEMPLATE_DIR}')
 
 created = 0
-worker_count = 0
+workers_used = 0
 
 for tpl in templates:
-    cfg = load_template(tpl)
-    name = get(cfg, 'Name') or tpl.stem
+    sections = load_template(tpl)
+    worker = sections.get('worker', {})
+    name = get(worker, 'Name') or tpl.stem
+
     ports = []
-    for p in split_values(get(cfg, 'Ports')):
+    for raw in split_values(get(worker, 'Ports')):
         try:
-            n = int(p)
-            if 1 <= n <= 65535:
-                ports.append(n)
+            port = int(raw)
+            if 1 <= port <= 65535 and port not in ports:
+                ports.append(port)
         except ValueError:
-            continue
+            pass
+
     if not ports:
-        print(f'[!] {tpl.name}: no valid Ports; skipped', file=sys.stderr)
+        warning(f'{tpl.name}: no valid Ports; skipped')
         continue
 
-    protocols = [p.lower() for p in split_values(get(cfg, 'Types')) if p.lower() in SUPPORTED_TYPES]
-    transports = [t.lower() for t in split_values(get(cfg, 'Transport')) if t.lower() in TRANSPORTS]
-    securities = [s.lower() for s in split_values(get(cfg, 'Security')) if s.lower() in {'tls','none','reality'}]
-    flows = split_values(get(cfg, 'Flow'))
-    if not flows:
-        flows = ['']
-    if not protocols or not transports or not securities:
-        print(f'[!] {tpl.name}: missing valid Types/Transport/Security; skipped', file=sys.stderr)
+    protocol_sections = []
+    for proto in ('vless', 'trojan'):
+        cfg = sections.get(proto)
+        if cfg is not None:
+            protocol_sections.append((proto, cfg))
+
+    if not protocol_sections:
+        warning(f'{tpl.name}: no [vless] or [trojan] section; skipped')
         continue
 
-    # Empty flow is represented by the literal empty alternative in the config.
-    combinations = itertools.product(edges, ports, protocols, transports, securities, flows)
-    worker_count += 1
-    for edge, port, protocol, transport, security, flow in combinations:
-        try:
-            outbound = make_outbound(cfg, protocol, edge, port, transport, security, flow)
-        except ValueError as exc:
-            print(f'[!] {tpl.name}: {exc}', file=sys.stderr)
+    workers_used += 1
+    info_text = []
+
+    for proto, cfg in protocol_sections:
+        transports = split_values(get(cfg, 'Transport'))
+        securities = split_values(get(cfg, 'Security'))
+        transports = list(dict.fromkeys(t.lower() for t in transports if t.lower() in {'tcp','ws','grpc'}))
+        securities = list(dict.fromkeys(s.lower() for s in securities if s.lower() in {'tls','none'}))
+
+        if not transports or not securities:
+            warning(f'{tpl.name} [{proto}]: no valid Transport/Security; skipped')
             continue
 
-        # sing-box requires UUID/password-like fields for several protocols. Do
-        # not emit obviously unusable candidates when mandatory credentials are absent.
-        if protocol in {'vless', 'vmess', 'tuic'} and not outbound.get('uuid'):
-            continue
-        if protocol == 'trojan' and not outbound.get('password'):
-            continue
-        if protocol == 'shadowsocks' and not outbound.get('password'):
-            continue
-        if protocol == 'hysteria2' and not outbound.get('password'):
-            continue
+        # Security/transport are evaluated only inside this protocol section.
+        candidates = 0
+        skipped_credential = 0
 
-        filename = f"{worker_count:02d}_{protocol}_{edge.replace(':','_')}_{port}_{transport}_{security}"
-        if flow:
-            filename += f"_{re.sub(r'[^A-Za-z0-9._-]+','_',flow)}"
-        path = OUTPUT_DIR / f"{filename}.json"
-        path.write_text(json.dumps(outbound, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-        created += 1
+        for edge, port, transport, security in itertools.product(edges, ports, transports, securities):
+            builder = PROTOCOL_BUILDERS[proto]
+            # Trojan currently requires TLS in the shared CF-edge worker model.
+            if proto == 'trojan' and security != 'tls':
+                continue
+            outbound = builder(cfg | worker, edge, port, transport, security)
+            if outbound is None:
+                skipped_credential += 1
+                continue
 
-print(f'Generated {created} JSON candidates from {worker_count} worker templates and {len(edges)} edge IPs.')
+            # A WS-specific path must exist when WS is selected.
+            if transport == 'ws' and not split_values(get(cfg, 'WSPath')):
+                continue
+            if transport == 'grpc' and not split_values(get(cfg, 'GRPCServiceName')):
+                # gRPC service name is required for our worker template model.
+                continue
+
+            safe = re.sub(r'[^A-Za-z0-9._-]+', '_', str(edge).replace(':','_'))
+            filename = f"{name}_{proto}_{safe}_{port}_{transport}_{security}.json"
+            (OUTPUT_DIR / filename).write_text(
+                json.dumps(outbound, indent=2, ensure_ascii=False) + '\n',
+                encoding='utf-8'
+            )
+            created += 1
+            candidates += 1
+
+        info_text.append(f'{proto}={candidates}')
+        if skipped_credential:
+            warning(f'{tpl.name} [{proto}]: skipped {skipped_credential} candidates (missing credential)')
+
+    info(f'{tpl.name}: ' + ', '.join(info_text) if info_text else f'{tpl.name}: no candidates')
+
+print(f'Generated {created} JSON candidates from {workers_used} worker templates and {len(edges)} edge IPs.')
 PY
 
 COUNT="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')"
 success "Maker complete: ${COUNT} JSON candidates written to ${OUTPUT_DIR}"
 printf '%s\n' '------------------------------------------------------------'
 printf '%-12s %s\n' "Candidates" "$COUNT"
-printf '%-12s %s\n' "Templates" "$(find "$TEMPLATE_DIR" -maxdepth 1 -type f -name '*.conf' | wc -l | tr -d ' ')"
+printf '%-12s %s\n' "Templates" "$(find "$TEMPLATE_DIR" -maxdepth 1 -type f -name 'worker*.conf' | wc -l | tr -d ' ')"
 printf '%-12s %s\n' "Edges" "$(tail -n +2 "$EDGE_FILE" | grep -c . || true)"
 printf '%s\n' '------------------------------------------------------------'
