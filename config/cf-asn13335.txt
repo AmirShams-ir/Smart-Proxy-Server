@@ -1,0 +1,7 @@
+# Cloudflare ASN metadata
+# AS13335 - Cloudflare, Inc.
+# Source: https://bgp.he.net/AS13335
+# This file documents the ASN used by the Edge Discovery design.
+# CIDR enumeration remains sourced from cf-ipv4.txt/cf-ipv6.txt until
+# an API-backed ASN synchronizer is added.
+AS13335
