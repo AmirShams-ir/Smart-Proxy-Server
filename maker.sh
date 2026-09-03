@@ -261,9 +261,6 @@ def main():
             protocol_invalid = 0
 
             for edge, port, transport, security in itertools.product(edges, ports, transports, securities):
-                if proto == 'trojan' and security != 'tls':
-                    protocol_invalid += 1
-                    continue
 
                 if proto == 'vless':
                     outbound = make_vless(cfg, edge, port, transport, security)
