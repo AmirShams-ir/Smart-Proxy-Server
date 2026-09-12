@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# ============================================================================
+# Smart Proxy Server - Candidate Validator
+# Stage 3: cheap real-proxy application validation
+#
+# maker.sh -> cache/generated/*.json -> validator.sh -> cache/validated/*.json
+#
+# Stage 1: one real proxy request per candidate, parallel=6 by default.
+# Stage 2: three repeat probes for the fastest candidates.
+#           median response time + jitter + stability.
+#
+# IMPORTANT:
+# A generated JSON file is an outbound fragment, not a complete sing-box
+# config. The candidate metadata tag is removed from the fragment and restored
+# as the real outbound tag inside the temporary validator config.
+#
+# No ICMP/ping is used.
+# ============================================================================
+
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$BASE_DIR/config/defaults.conf"
 
@@ -16,6 +34,7 @@ TOP_CANDIDATES="${VALIDATOR_TOP:-20}"
 FINAL_TOP="${VALIDATOR_FINAL_TOP:-10}"
 STAGE1_TIMEOUT="${VALIDATOR_STAGE1_TIMEOUT:-4}"
 STAGE2_TIMEOUT="${VALIDATOR_STAGE2_TIMEOUT:-5}"
+VALIDATOR_TEST_HOST="${VALIDATOR_TEST_HOST:-example.com}"
 SING_BOX="${SING_BOX_BIN:-sing-box}"
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
@@ -79,7 +98,7 @@ next_port(){ echo $((19080 + $1)); }
 
 probe_once(){
     local candidate="$1" timeout_s="$2" run_dir="$3" socks_port="$4"
-    local generated="$run_dir/config.json" pid="" start end elapsed curl_rc code
+    local generated="$run_dir/config.json" pid="" start end elapsed curl_rc code scheme test_url
 
     python3 - "$candidate" "$generated" "$socks_port" <<'PY'
 import json, sys
@@ -87,12 +106,8 @@ candidate_path, out_path, socks_port = sys.argv[1], sys.argv[2], int(sys.argv[3]
 with open(candidate_path, encoding='utf-8') as fh:
     candidate=json.load(fh)
 
-# maker.sh stores tag only as candidate metadata. Remove it from the outbound,
-# then attach it again as a real sing-box outbound tag in the wrapper config.
 outbound=dict(candidate)
-outbound_tag=str(outbound.pop('tag', 'validator-out'))
-if not outbound_tag:
-    outbound_tag='validator-out'
+outbound_tag=str(outbound.pop('tag', 'validator-out')) or 'validator-out'
 
 cfg={
     'log': {'level': 'error'},
@@ -136,6 +151,47 @@ PY
         return 1
     fi
 
+    # Cheap validation checks actual application traffic through the tested
+    # proxy. Keep the target deliberately simple; score.sh performs the
+    # expensive performance benchmark later.
+    if grep -q '"type":"tls"' /dev/null 2>/dev/null; then :; fi
+
+    # Infer whether the candidate is plain or TLS-enabled from its generated
+    # filename/metadata rather than making every candidate use HTTPS.
+    if python3 - "$candidate" <<'PY' >/dev/null
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d=json.load(f)
+print('tls' if (d.get('tls') or {}).get('enabled') else 'none')
+PY
+    then :; fi
+
+    if python3 - "$candidate" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d=json.load(f)
+print('1' if (d.get('tls') or {}).get('enabled') else '0')
+PY
+    then
+        :
+    fi
+
+    local security
+    security="$(python3 - "$candidate" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d=json.load(f)
+print('tls' if (d.get('tls') or {}).get('enabled') else 'none')
+PY
+)"
+
+    if [[ "$security" == "tls" ]]; then
+        scheme="https"
+    else
+        scheme="http"
+    fi
+    test_url="${scheme}://${VALIDATOR_TEST_HOST}/"
+
     start="$(date +%s%3N)"
     set +e
     timeout "$timeout_s" curl -fsS \
@@ -144,7 +200,7 @@ PY
         --max-time "$timeout_s" \
         -o /dev/null \
         -w '%{http_code}\n' \
-        'https://cp.cloudflare.com/generate_204' > "$run_dir/httpcode"
+        "$test_url" > "$run_dir/httpcode" 2>"$run_dir/curl.err"
     curl_rc=$?
     set -e
     end="$(date +%s%3N)"
@@ -152,13 +208,14 @@ PY
 
     code="$(cat "$run_dir/httpcode" 2>/dev/null || true)"
     if (( curl_rc == 0 )) && [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
-        printf 'status=ok\nrtt=%s\nhttp=%s\n' "$elapsed" "$code" > "$run_dir/result"
+        printf 'status=ok\nrtt=%s\nhttp=%s\nsecurity=%s\n' "$elapsed" "$code" "$security" > "$run_dir/result"
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
         return 0
     fi
 
-    printf 'status=failed\nrtt=%s\nhttp=%s\ncurl_rc=%s\n' "$elapsed" "$code" "$curl_rc" > "$run_dir/result"
+    printf 'status=failed\nrtt=%s\nhttp=%s\ncurl_rc=%s\nsecurity=%s\n' \
+        "$elapsed" "$code" "$curl_rc" "$security" > "$run_dir/result"
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     return 1
