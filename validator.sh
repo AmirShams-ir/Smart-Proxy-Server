@@ -4,19 +4,6 @@ set -Eeuo pipefail
 # ============================================================================
 # Smart Proxy Server - Candidate Validator
 # Stage 3: cheap real-proxy application validation
-#
-# maker.sh -> cache/generated/*.json -> validator.sh -> cache/validated/*.json
-#
-# Stage 1: one real proxy request per candidate, parallel=6 by default.
-# Stage 2: three repeat probes for the fastest candidates.
-#           median response time + jitter + stability.
-#
-# IMPORTANT:
-# A generated JSON file is an outbound fragment, not a complete sing-box
-# config. The candidate metadata tag is removed from the fragment and restored
-# as the real outbound tag inside the temporary validator config.
-#
-# No ICMP/ping is used.
 # ============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +21,6 @@ TOP_CANDIDATES="${VALIDATOR_TOP:-20}"
 FINAL_TOP="${VALIDATOR_FINAL_TOP:-10}"
 STAGE1_TIMEOUT="${VALIDATOR_STAGE1_TIMEOUT:-4}"
 STAGE2_TIMEOUT="${VALIDATOR_STAGE2_TIMEOUT:-5}"
-VALIDATOR_TEST_HOST="${VALIDATOR_TEST_HOST:-example.com}"
 SING_BOX="${SING_BOX_BIN:-sing-box}"
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
@@ -55,7 +41,7 @@ if ! flock -n 9; then
         warning "Another validator run is already active (PID $lock_pid)."
         exit 0
     fi
-    warning "Validator lock is busy but owner metadata is stale; continuing."
+    warning "Validator lock metadata is stale; continuing."
 fi
 printf '%s\n' "$$" > "$LOCK_META"
 trap 'rm -f "$LOCK_META"' EXIT
@@ -98,7 +84,7 @@ next_port(){ echo $((19080 + $1)); }
 
 probe_once(){
     local candidate="$1" timeout_s="$2" run_dir="$3" socks_port="$4"
-    local generated="$run_dir/config.json" pid="" start end elapsed curl_rc code scheme test_url
+    local generated="$run_dir/config.json" pid="" start end elapsed curl_rc code security scheme test_url
 
     python3 - "$candidate" "$generated" "$socks_port" <<'PY'
 import json, sys
@@ -145,38 +131,12 @@ PY
     done
 
     if (( ready != 1 )); then
+        printf 'status=timeout\nreason=local-listener\n' > "$run_dir/result"
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
-        printf 'status=timeout\nreason=local-listener\n' > "$run_dir/result"
         return 1
     fi
 
-    # Cheap validation checks actual application traffic through the tested
-    # proxy. Keep the target deliberately simple; score.sh performs the
-    # expensive performance benchmark later.
-    if grep -q '"type":"tls"' /dev/null 2>/dev/null; then :; fi
-
-    # Infer whether the candidate is plain or TLS-enabled from its generated
-    # filename/metadata rather than making every candidate use HTTPS.
-    if python3 - "$candidate" <<'PY' >/dev/null
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    d=json.load(f)
-print('tls' if (d.get('tls') or {}).get('enabled') else 'none')
-PY
-    then :; fi
-
-    if python3 - "$candidate" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    d=json.load(f)
-print('1' if (d.get('tls') or {}).get('enabled') else '0')
-PY
-    then
-        :
-    fi
-
-    local security
     security="$(python3 - "$candidate" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as f:
@@ -190,7 +150,10 @@ PY
     else
         scheme="http"
     fi
-    test_url="${scheme}://${VALIDATOR_TEST_HOST}/"
+
+    # A tiny deterministic target. We only need the proxy to complete a real
+    # HTTP request here; score.sh will do the expensive benchmark later.
+    test_url="${scheme}://example.com/"
 
     start="$(date +%s%3N)"
     set +e
@@ -214,8 +177,7 @@ PY
         return 0
     fi
 
-    printf 'status=failed\nrtt=%s\nhttp=%s\ncurl_rc=%s\nsecurity=%s\n' \
-        "$elapsed" "$code" "$curl_rc" "$security" > "$run_dir/result"
+    printf 'status=failed\nrtt=%s\nhttp=%s\ncurl_rc=%s\nsecurity=%s\n' "$elapsed" "$code" "$curl_rc" "$security" > "$run_dir/result"
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     return 1
@@ -226,6 +188,7 @@ stage1_worker(){
     local meta name server port transport security run_dir result rtt status
     run_dir="$WORK_DIR/stage1_${idx}_$$"
     mkdir -p "$run_dir"
+
     meta="$(metadata "$candidate" 2>/dev/null || true)"
     [[ "$meta" == error=* ]] && { rm -rf "$run_dir"; return 0; }
 
@@ -243,6 +206,7 @@ stage1_worker(){
             printf '%s\t%s\t%s\t%s\t%s\t%s\tstage1\n' "$rtt" "$candidate" "$name" "$server" "$port" "$transport/$security" >> "$RESULT_FILE"
         fi
     fi
+
     rm -rf "$run_dir"
 }
 
@@ -267,7 +231,7 @@ for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
 
 STAGE1_COUNT="$(wc -l < "$RESULT_FILE" | tr -d ' ')"
 info "Stage 1 valid: $STAGE1_COUNT / ${#CANDIDATES[@]}"
-((STAGE1_COUNT > 0)) || fatal "No candidate passed Stage 1."
+(( STAGE1_COUNT > 0 )) || fatal "No candidate passed Stage 1. See cache/validator for probe errors."
 
 none_values="$(awk -F'\t' '$6 ~ /\/none$/ {print $1}' "$RESULT_FILE" | sort -n || true)"
 tls_values="$(awk -F'\t' '$6 ~ /\/tls$/ {print $1}' "$RESULT_FILE" | sort -n || true)"
@@ -283,7 +247,7 @@ STAGE2_LIST="$WORK_DIR/stage2.list"
 awk -F'\t' -v off="$NORMALIZE_OFFSET" 'function adjusted(r,sec){if(sec ~ /\/none$/) return r+off; return r}{print adjusted($1,$6) "\t" $0}' "$RESULT_FILE" | sort -n -k1,1 | head -n "$TOP_CANDIDATES" | cut -f2- > "$STAGE2_LIST"
 STAGE2_COUNT="$(wc -l < "$STAGE2_LIST" | tr -d ' ')"
 info "Stage 2 candidates: $STAGE2_COUNT"
-((STAGE2_COUNT > 0)) || fatal "No candidates selected for Stage 2."
+(( STAGE2_COUNT > 0 )) || fatal "No candidates selected for Stage 2."
 
 STAGE2_RESULT="$WORK_DIR/stage2.tsv"
 : > "$STAGE2_RESULT"
