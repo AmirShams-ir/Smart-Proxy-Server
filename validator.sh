@@ -188,12 +188,14 @@ PY
     "$SING_BOX" run -c "$generated" >"$probe_out" 2>"$probe_err" &
     pid=$!
 
-    cleanup_probe(){
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-    }
+cleanup_probe(){
+    local _pid="${pid:-}"
+
+    if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
+        kill "$_pid" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null || true
+    fi
+}
     trap cleanup_probe RETURN
 
     # Wait briefly for the local mixed listener.
