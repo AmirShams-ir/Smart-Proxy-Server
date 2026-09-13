@@ -148,7 +148,7 @@ TMP_OUTPUT="${OUTPUT_FILE}.tmp"
         [[ -s "$result" ]] || continue
         cat "$result"
     done | sort -t',' -k2,2n -k1,1
-a} > "$TMP_OUTPUT"
+} > "$TMP_OUTPUT"
 mv "$TMP_OUTPUT" "$OUTPUT_FILE"
 
 VALID_COUNT="$(($(wc -l < "$OUTPUT_FILE") - 1))"
