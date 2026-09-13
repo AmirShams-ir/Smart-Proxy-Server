@@ -24,15 +24,6 @@ OUTPUT_FILE="$BASE_DIR/cache/valid.csv"
 SINGTEST="$BASE_DIR/singtest.sh"
 DEFAULTS_FILE="$BASE_DIR/config/defaults.conf"
 
-if [[ -n "${VALIDATOR_PARALLEL:-}" ]]; then
-    PARALLEL="$VALIDATOR_PARALLEL"
-elif [[ -f "$DEFAULTS_FILE" ]]; then
-    PARALLEL="$(awk -F= '$1=="VALIDATOR_PARALLEL"{v=$0; sub(/^[^=]*=/,"",v); gsub(/^ +| +$/,"",v); print v; exit}' "$DEFAULTS_FILE")"
-    PARALLEL="${PARALLEL:-4}"
-else
-    PARALLEL=4
-fi
-
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
 info(){ printf '[*] %s\n' "$*"; }
 success(){ printf '[✓] %s\n' "$*"; }
@@ -41,9 +32,25 @@ require_cmd(){
     command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
 }
 
-is_uint(){
-    [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ));
-}
+# Prefer explicit environment override, then defaults.conf, then 4.
+PARALLEL="${VALIDATOR_PARALLEL:-}"
+if [[ -z "$PARALLEL" && -f "$DEFAULTS_FILE" ]]; then
+    PARALLEL="$(awk -F= '
+        $1=="VALIDATOR_PARALLEL" {
+            v=$2
+            gsub(/^ +| +$/, "", v)
+            if (v ~ /^\$\{/) {
+                sub(/^\$\{[^:]+:-?/, "", v)
+                sub(/\}$/, "", v)
+            }
+            print v
+            exit
+        }
+    ' "$DEFAULTS_FILE")"
+fi
+PARALLEL="${PARALLEL:-4}"
+[[ "$PARALLEL" =~ ^[0-9]+$ ]] || PARALLEL=4
+(( 10#$PARALLEL > 0 )) || PARALLEL=4
 
 require_cmd awk
 require_cmd find
@@ -54,7 +61,6 @@ require_cmd python3
 
 [[ -f "$SINGTEST" ]] || fatal "singtest.sh not found: $SINGTEST"
 [[ -d "$INPUT_DIR" ]] || fatal "Generated directory not found: $INPUT_DIR"
-is_uint "$PARALLEL" || fatal "VALIDATOR_PARALLEL must be a positive integer"
 
 chmod +x "$SINGTEST"
 mkdir -p "$BASE_DIR/cache"
