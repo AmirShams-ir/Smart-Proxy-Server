@@ -7,7 +7,7 @@ set -Eeuo pipefail
 # Parallel wrapper around singtest.sh.
 # Reads generated JSON configs from cache/generated/,
 # reuses singtest.sh unchanged as the ONLY connectivity/RTT test engine,
-# and stores ONLY successful candidates sorted by RTT (ascending) in:
+# and stores ONLY the top VALIDATOR_TOP successful candidates sorted by RTT in:
 #   cache/valid.csv
 #
 # CSV contract:
@@ -32,30 +32,40 @@ require_cmd(){
     command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
 }
 
-# Prefer explicit environment override, then defaults.conf, then 4.
-PARALLEL="${VALIDATOR_PARALLEL:-}"
-if [[ -z "$PARALLEL" && -f "$DEFAULTS_FILE" ]]; then
-    PARALLEL="$(awk -F= '
-        $1=="VALIDATOR_PARALLEL" {
+read_default(){
+    local key="$1"
+    local value=""
+    [[ -f "$DEFAULTS_FILE" ]] || return 0
+    value="$(awk -F= -v key="$key" '
+        $1==key {
             v=$2
             gsub(/^ +| +$/, "", v)
-            if (v ~ /^\$\{/) {
-                sub(/^\$\{[^:]+:-?/, "", v)
-                sub(/\}$/, "", v)
+            if (v ~ /^\\$\\{/) {
+                sub(/^\\$\\{[^:]+:-?/, "", v)
+                sub(/\\}$/, "", v)
             }
             print v
             exit
         }
     ' "$DEFAULTS_FILE")"
-fi
+    printf '%s\n' "$value"
+}
+
+PARALLEL="${VALIDATOR_PARALLEL:-$(read_default VALIDATOR_PARALLEL)}"
 PARALLEL="${PARALLEL:-4}"
 [[ "$PARALLEL" =~ ^[0-9]+$ ]] || PARALLEL=4
 (( 10#$PARALLEL > 0 )) || PARALLEL=4
+
+TOP="${VALIDATOR_TOP:-$(read_default VALIDATOR_TOP)}"
+TOP="${TOP:-10}"
+[[ "$TOP" =~ ^[0-9]+$ ]] || TOP=10
+(( 10#$TOP > 0 )) || TOP=10
 
 require_cmd awk
 require_cmd find
 require_cmd mktemp
 require_cmd sort
+require_cmd head
 require_cmd wc
 require_cmd python3
 
@@ -119,6 +129,7 @@ validate_one(){
 
 info "Testing ${#CANDIDATES[@]} generated JSON candidates..."
 info "Parallel workers: $PARALLEL"
+info "Top valid candidates to keep: $TOP"
 printf '\n'
 printf '%-56s %8s\n' 'Profile' 'RTT'
 printf '%s\n' '----------------------------------------------------------------'
@@ -138,6 +149,7 @@ while (( next_index < ${#CANDIDATES[@]} || running > 0 )); do
     fi
 done
 
+# Print every tested candidate in deterministic input order.
 for display in "$RESULT_DIR"/display-*.txt; do
     [[ -f "$display" ]] || continue
     cat "$display"
@@ -149,16 +161,17 @@ done | sort -t'|' -k3,3n | while IFS='|' read -r profile rtt index; do
     fi
 done
 
+# Store only the fastest TOP successful candidates.
 TMP_OUTPUT="${OUTPUT_FILE}.tmp"
 {
     printf 'profile,rtt\n'
     for result in "$RESULT_DIR"/result-*.csv; do
         [[ -s "$result" ]] || continue
         cat "$result"
-    done | sort -t',' -k2,2n -k1,1
+    done | sort -t',' -k2,2n -k1,1 | head -n "$TOP"
 } > "$TMP_OUTPUT"
 mv "$TMP_OUTPUT" "$OUTPUT_FILE"
 
 VALID_COUNT="$(($(wc -l < "$OUTPUT_FILE") - 1))"
 printf '%s\n' '----------------------------------------------------------------'
-success "Validation complete: $VALID_COUNT valid candidates written to $OUTPUT_FILE"
+success "Validation complete: $VALID_COUNT top valid candidates written to $OUTPUT_FILE"
