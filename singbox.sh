@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Smart Proxy Server - Stage 3 : Sing-box RTT Validator
 # ------------------------------------------------------------------------------
 # Reads generated JSON outbound candidates from cache/generated/*.json,
-# validates them through an isolated local sing-box SOCKS listener, measures
+# validates them through isolated local sing-box SOCKS listeners, measures
 # only request RTT, prints only Profile + RTT, and stores all results in:
 #   cache/validated/rtt.json
 #
@@ -28,6 +28,7 @@ PARALLEL="${SINGBOX_PARALLEL:-4}"
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
 info(){ printf '[*] %s\n' "$*"; }
 warning(){ printf '[!] %s\n' "$*" >&2; }
+success(){ printf '[✓] %s\n' "$*"; }
 
 require_cmd(){
     command -v "$1" >/dev/null 2>&1 || fatal "Missing required command: $1"
@@ -49,6 +50,9 @@ require_cmd sort
 require_cmd find
 require_cmd mktemp
 require_cmd date
+require_cmd grep
+require_cmd wc
+require_cmd sleep
 
 is_uint "$PARALLEL" || fatal "SINGBOX_PARALLEL must be a positive integer"
 
@@ -60,8 +64,8 @@ shopt -u nullglob
 
 RUN_DIR="$WORK_ROOT/run-$$"
 mkdir -p "$RUN_DIR"
-RESULT_FILE="$RUN_DIR/results.jsonl"
-: > "$RESULT_FILE"
+RESULT_DIR="$RUN_DIR/results"
+mkdir -p "$RESULT_DIR"
 
 cleanup(){
     rm -rf "$RUN_DIR"
@@ -84,26 +88,42 @@ free_port(){
 }
 
 # ------------------------------------------------------------------------------
-# Validate one generated outbound and return one JSON line:
-# {"profile":"...","rtt":123,"status":"passed"}
-# or
-# {"profile":"...","rtt":null,"status":"failed"}
+# Write a single result atomically to its own per-job file.
+# ------------------------------------------------------------------------------
+write_result(){
+    local output="$1" profile="$2" rtt="$3" status="$4"
+    python3 - "$output" "$profile" "$rtt" "$status" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+profile = sys.argv[2]
+rtt_raw = sys.argv[3]
+status = sys.argv[4]
+
+rtt = None if rtt_raw == "null" else int(rtt_raw)
+out.write_text(
+    json.dumps({"profile": profile, "rtt": rtt, "status": status}, ensure_ascii=False),
+    encoding="utf-8",
+)
+PY
+}
+
+# ------------------------------------------------------------------------------
+# Validate one generated outbound and return one JSON object in its own file.
 # ------------------------------------------------------------------------------
 validate_one(){
     local input="$1"
     local index="$2"
-    local name port run_dir config_file log_file err_file http_file curl_err meta_file pid
+    local name port run_dir config_file log_file err_file http_file curl_err meta_file pid result_file
     name="$(basename "$input" .json)"
     run_dir="$RUN_DIR/job-$index"
+    result_file="$RESULT_DIR/result-$index.json"
     mkdir -p "$run_dir"
 
     port="$(free_port "$((START_PORT + index))")" || {
-        python3 - "$RESULT_FILE" "$name" <<'PY'
-import json, sys
-out, name = sys.argv[1], sys.argv[2]
-with open(out, "a", encoding="utf-8") as f:
-    f.write(json.dumps({"profile": name, "rtt": None, "status": "failed"}, ensure_ascii=False) + "\n")
-PY
+        write_result "$result_file" "$name" null failed
         return 0
     }
 
@@ -122,9 +142,8 @@ PY
         fi
     }
 
-    python3 - "$input" "$config_file" "$port" "$meta_file" <<'PY'
+    if ! python3 - "$input" "$config_file" "$port" "$meta_file" <<'PY'
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -135,7 +154,7 @@ meta = Path(sys.argv[4])
 
 data = json.loads(src.read_text(encoding="utf-8"))
 if not isinstance(data, dict):
-    raise SystemExit("JSON root must be an object")
+    raise ValueError("JSON root must be an object")
 
 outbound = dict(data)
 tag = str(outbound.pop("tag", "singtest-out")) or "singtest-out"
@@ -160,17 +179,15 @@ cfg = {
 }
 
 out.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-with meta.open("w", encoding="utf-8") as f:
-    print(f"tag={tag}", file=f)
+meta.write_text(f"tag={tag}\n", encoding="utf-8")
 PY
+    then
+        write_result "$result_file" "$name" null failed
+        return 0
+    fi
 
-    if ! "$SING_BOX" check -c "$config_file" >/dev/null 2>"$err_file"; then
-        python3 - "$RESULT_FILE" "$name" <<'PY'
-import json, sys
-out, name = sys.argv[1], sys.argv[2]
-with open(out, "a", encoding="utf-8") as f:
-    f.write(json.dumps({"profile": name, "rtt": None, "status": "failed"}, ensure_ascii=False) + "\n")
-PY
+    if ! "$SING_BOX" check -c "$config_file" >"$run_dir/check.out" 2>"$err_file"; then
+        write_result "$result_file" "$name" null failed
         return 0
     fi
 
@@ -191,12 +208,7 @@ PY
 
     if (( ready == 0 )); then
         cleanup_one
-        python3 - "$RESULT_FILE" "$name" <<'PY'
-import json, sys
-out, name = sys.argv[1], sys.argv[2]
-with open(out, "a", encoding="utf-8") as f:
-    f.write(json.dumps({"profile": name, "rtt": None, "status": "failed"}, ensure_ascii=False) + "\n")
-PY
+        write_result "$result_file" "$name" null failed
         return 0
     fi
 
@@ -219,19 +231,9 @@ PY
     cleanup_one
 
     if (( curl_rc == 0 )) && [[ "$http_code" =~ ^[23][0-9][0-9]$ ]]; then
-        python3 - "$RESULT_FILE" "$name" "$rtt" <<'PY'
-import json, sys
-out, name, rtt = sys.argv[1], sys.argv[2], int(sys.argv[3])
-with open(out, "a", encoding="utf-8") as f:
-    f.write(json.dumps({"profile": name, "rtt": rtt, "status": "passed"}, ensure_ascii=False) + "\n")
-PY
+        write_result "$result_file" "$name" "$rtt" passed
     else
-        python3 - "$RESULT_FILE" "$name" <<'PY'
-import json, sys
-out, name = sys.argv[1], sys.argv[2]
-with open(out, "a", encoding="utf-8") as f:
-    f.write(json.dumps({"profile": name, "rtt": None, "status": "failed"}, ensure_ascii=False) + "\n")
-PY
+        write_result "$result_file" "$name" null failed
     fi
 }
 
@@ -251,26 +253,23 @@ for input in "${CANDIDATES[@]}"; do
 done
 wait || true
 
-# Keep the output deterministic and sort passed candidates by RTT first.
-python3 - "$RESULT_FILE" "$OUTPUT_FILE" <<'PY'
+# ------------------------------------------------------------------------------
+# Build the final JSON and print only Profile + RTT.
+# ------------------------------------------------------------------------------
+python3 - "$RESULT_DIR" "$OUTPUT_FILE" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-src = Path(sys.argv[1])
+results_dir = Path(sys.argv[1])
 out = Path(sys.argv[2])
 
 rows = []
-with src.open(encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        rows.append(row)
+for src in sorted(results_dir.glob("result-*.json")):
+    try:
+        rows.append(json.loads(src.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        continue
 
 rows.sort(key=lambda x: (
     0 if x.get("status") == "passed" and isinstance(x.get("rtt"), int) else 1,
@@ -282,7 +281,7 @@ out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 for row in rows:
-    profile = row.get("profile", "-")
+    profile = str(row.get("profile", "-"))
     rtt = row.get("rtt")
     if row.get("status") == "passed" and isinstance(rtt, int):
         print(f"{profile}\t{rtt}ms")
@@ -291,4 +290,4 @@ for row in rows:
 PY
 
 printf '%s\n' '----------------------------------------------------------------'
-success "RTT validation complete: ${OUTPUT_FILE}"
+success "RTT validation complete: $OUTPUT_FILE"
