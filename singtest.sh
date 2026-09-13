@@ -24,7 +24,7 @@ set -Eeuo pipefail
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SING_BOX="${SING_BOX_BIN:-sing-box}"
-TARGET_URL="${SINGTEST_URL:-https://example.com/}"
+TARGET_URL="${SINGTEST_URL:-https://google.com/}"
 TIMEOUT="${SINGTEST_TIMEOUT:-8}"
 PORT="${SINGTEST_PORT:-19180}"
 WORK_DIR="${SINGTEST_WORK_DIR:-/tmp/smartproxy-singtest}"
