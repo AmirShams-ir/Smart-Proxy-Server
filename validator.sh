@@ -2,349 +2,294 @@
 set -Eeuo pipefail
 
 # ============================================================================
-# Smart Proxy Server - Candidate Validator
-# Stage 3: cheap real-proxy application validation
+# Smart Proxy Server - singtest
+#
+# Fast connectivity test for one sing-box configuration/outbound.
+#
+# Usage:
+#   bash singtest.sh /etc/sing-box/config.json
+#   bash singtest.sh cache/generated/candidate.json
+#
+# Design:
+#   - Do NOT create a temporary SOCKS/mixed inbound.
+#   - Do NOT run speed, upload, download, jitter, or ranking tests.
+#   - For a full production config, temporarily run that exact config on a
+#     private SOCKS port and test it with the same curl method used by test.sh.
+#   - For a generated outbound fragment, wrap only that outbound into a minimal
+#     sing-box config and test it on a private SOCKS port.
 # ============================================================================
-#
-# Pipeline:
-#   maker.sh -> cache/generated/*.json -> validator.sh
-#   Stage 1: one real application probe per candidate (parallel=6)
-#   Stage 2: three probes for the fastest candidates
-#            -> median response time + jitter + stability
-#   -> cache/validated/*.json -> score.sh
-#
-# A generated JSON file is an outbound fragment. Its maker metadata tag is
-# removed before building the temporary sing-box configuration and restored as
-# the real outbound tag.
-#
-# No ICMP/ping is used. The validator measures real proxy application traffic.
-# ============================================================================
 
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$BASE_DIR/config/defaults.conf"
-
-GENERATED_DIR="$BASE_DIR/cache/generated"
-VALIDATED_DIR="$BASE_DIR/cache/validated"
-WORK_DIR="$BASE_DIR/cache/validator"
-RESULT_FILE="$WORK_DIR/results.tsv"
-LOCK_FILE="/run/smartproxy-validator.lock"
-LOCK_META="/run/smartproxy-validator.lock.info"
-
-PARALLEL="${VALIDATOR_PARALLEL:-6}"
-TOP_CANDIDATES="${VALIDATOR_TOP:-20}"
-FINAL_TOP="${VALIDATOR_FINAL_TOP:-10}"
-STAGE1_TIMEOUT="${VALIDATOR_STAGE1_TIMEOUT:-4}"
-STAGE2_TIMEOUT="${VALIDATOR_STAGE2_TIMEOUT:-5}"
 SING_BOX="${SING_BOX_BIN:-sing-box}"
+TARGET_URL="${SINGTEST_URL:-https://cp.cloudflare.com/generate_204}"
+TIMEOUT="${SINGTEST_TIMEOUT:-8}"
+PORT="${SINGTEST_PORT:-1234}"
+WORK_ROOT="${SINGTEST_WORK_DIR:-/tmp/smartproxy-singtest}"
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[*] %s\n' "$*"; }
 success(){ printf '[✓] %s\n' "$*"; }
 warning(){ printf '[!] %s\n' "$*" >&2; }
-info(){ printf '[*] %s\n' "$*"; }
-require_cmd(){ command -v "$1" >/dev/null 2>&1 || fatal "Missing required command: $1"; }
-is_number(){ [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 
-mkdir -p "$VALIDATED_DIR" "$WORK_DIR"
-rm -f "$RESULT_FILE" "$VALIDATED_DIR"/*.json
-: > "$RESULT_FILE"
+usage(){
+    printf 'Usage: %s <sing-box-config.json>\n' "$(basename "$0")" >&2
+    exit 2
+}
 
-# Prevent concurrent validator runs. The lock is held by FD 9 and is released
-# automatically when the shell exits. The pathname itself is not ownership.
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-    lock_pid="$(cat "$LOCK_META" 2>/dev/null || true)"
-    if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-        warning "Another validator run is already active (PID $lock_pid)."
-        exit 0
-    fi
-    warning "Validator lock metadata is stale; continuing."
-fi
-printf '%s\n' "$$" > "$LOCK_META"
-trap 'rm -f "$LOCK_META"' EXIT
+require_cmd(){
+    command -v "$1" >/dev/null 2>&1 || fatal "Missing required command: $1"
+}
+
+[[ $# -eq 1 ]] || usage
+INPUT="$1"
+[[ -f "$INPUT" ]] || fatal "Config not found: $INPUT"
 
 require_cmd "$SING_BOX"
 require_cmd python3
-require_cmd awk
-require_cmd sort
-require_cmd timeout
 require_cmd curl
-require_cmd flock
+require_cmd timeout
+require_cmd ss
 
-[[ -d "$GENERATED_DIR" ]] || fatal "Missing generated candidate directory: $GENERATED_DIR"
+mkdir -p "$WORK_ROOT"
+RUN_DIR="$WORK_ROOT/run-$$"
+mkdir -p "$RUN_DIR"
 
-shopt -s nullglob
-CANDIDATES=("$GENERATED_DIR"/*.json)
-shopt -u nullglob
-[[ ${#CANDIDATES[@]} -gt 0 ]] || fatal "No JSON candidates found in $GENERATED_DIR"
+CONFIG_FILE="$RUN_DIR/config.json"
+LOG_FILE="$RUN_DIR/sing-box.log"
+ERR_FILE="$RUN_DIR/sing-box.err"
+HTTP_FILE="$RUN_DIR/httpcode"
+CURL_ERR="$RUN_DIR/curl.err"
+META_FILE="$RUN_DIR/meta.txt"
+PID=""
 
-(( PARALLEL > 0 )) || fatal "VALIDATOR_PARALLEL must be > 0"
-(( TOP_CANDIDATES > 0 )) || fatal "VALIDATOR_TOP must be > 0"
-(( FINAL_TOP > 0 )) || fatal "VALIDATOR_FINAL_TOP must be > 0"
-
-metadata(){
-    python3 - "$1" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    d=json.load(fh)
-transport=(d.get('transport') or {}).get('type', 'tcp')
-tls=(d.get('tls') or {})
-print(f"name={d.get('tag','candidate')}")
-print(f"server={d.get('server','')}")
-print(f"port={d.get('server_port','')}")
-print(f"transport={transport}")
-print(f"security={'tls' if tls.get('enabled') else 'none'}")
-PY
+cleanup(){
+    if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then
+        kill "$PID" 2>/dev/null || true
+        wait "$PID" 2>/dev/null || true
+    fi
 }
+trap cleanup EXIT INT TERM
 
-next_port(){ echo $((19080 + $1)); }
+###############################################################################
+# Build a test config.
+# For a full config, preserve the selected outbound exactly as-is and only
+# replace the inbound with a private SOCKS listener. This mirrors test.sh:
+# curl -> socks5-hostname -> real sing-box outbound.
+###############################################################################
+python3 - "$INPUT" "$CONFIG_FILE" "$PORT" "$META_FILE" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
 
-probe_once(){
-    local candidate="$1" timeout_s="$2" run_dir="$3" socks_port="$4"
-    local generated="$run_dir/config.json"
-    local pid="" start end elapsed curl_rc code security scheme test_url
+src = Path(sys.argv[1])
+out = Path(sys.argv[2])
+port = int(sys.argv[3])
+meta = Path(sys.argv[4])
 
-    python3 - "$candidate" "$generated" "$socks_port" <<'PY'
-import json, sys
-candidate_path, out_path, socks_port = sys.argv[1], sys.argv[2], int(sys.argv[3])
-with open(candidate_path, encoding='utf-8') as fh:
-    candidate=json.load(fh)
+data = json.loads(src.read_text(encoding='utf-8'))
 
-outbound=dict(candidate)
-outbound_tag=str(outbound.pop('tag', 'validator-out')) or 'validator-out'
+if not isinstance(data, dict):
+    raise SystemExit('JSON root must be an object')
 
-cfg={
+# ---------------------------------------------------------------------------
+# Full sing-box config
+# ---------------------------------------------------------------------------
+if 'outbounds' in data:
+    cfg = data
+    outbounds = cfg.get('outbounds') or []
+    if not outbounds:
+        raise SystemExit('full config contains no outbounds')
+
+    wanted = os.environ.get('SINGTEST_OUTBOUND', '').strip()
+    route = cfg.get('route') or {}
+    if not wanted and isinstance(route, dict):
+        final = route.get('final')
+        if isinstance(final, str) and final:
+            wanted = final
+
+    if not wanted:
+        for item in outbounds:
+            if isinstance(item, dict) and item.get('tag'):
+                wanted = str(item['tag'])
+                break
+
+    if not wanted:
+        raise SystemExit('could not determine outbound')
+
+    selected = None
+    for item in outbounds:
+        if isinstance(item, dict) and item.get('tag') == wanted:
+            selected = item
+            break
+
+    if selected is None:
+        raise SystemExit(f'outbound not found: {wanted}')
+
+    # Use the exact selected outbound and isolate only the inbound side.
+    cfg = dict(cfg)
+    cfg['inbounds'] = [{
+        'type': 'socks',
+        'tag': 'singtest-in',
+        'listen': '127.0.0.1',
+        'listen_port': port,
+    }]
+    cfg['route'] = dict(cfg.get('route') or {})
+    cfg['route']['final'] = wanted
+    cfg['route']['rules'] = []
+    cfg.pop('experimental', None)
+
+    out.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding='utf-8')
+
+    transport = (selected.get('transport') or {}).get('type', 'tcp')
+    security = 'tls' if (selected.get('tls') or {}).get('enabled') else 'none'
+    print(f'mode=full', file=meta.open('w', encoding='utf-8'))
+    with meta.open('a', encoding='utf-8') as f:
+        print(f'tag={wanted}', file=f)
+        print(f"protocol={selected.get('type','unknown')}", file=f)
+        print(f"server={selected.get('server','-')}", file=f)
+        print(f"port={selected.get('server_port','-')}", file=f)
+        print(f'transport={transport}', file=f)
+        print(f'security={security}', file=f)
+    raise SystemExit(0)
+
+# ---------------------------------------------------------------------------
+# Generated outbound fragment from maker.sh
+# ---------------------------------------------------------------------------
+outbound = dict(data)
+tag = str(outbound.pop('tag', 'singtest-out')) or 'singtest-out'
+
+cfg = {
     'log': {'level': 'error'},
     'inbounds': [{
-        'type': 'mixed',
-        'tag': 'validator-in',
+        'type': 'socks',
+        'tag': 'singtest-in',
         'listen': '127.0.0.1',
-        'listen_port': socks_port,
+        'listen_port': port,
     }],
     'outbounds': [
-        dict(outbound, tag=outbound_tag),
+        dict(outbound, tag=tag),
         {'type': 'direct', 'tag': 'direct'},
+        {'type': 'block', 'tag': 'block'},
     ],
-    'route': {'final': outbound_tag},
+    'route': {
+        'final': tag,
+        'rules': [],
+    },
 }
-with open(out_path,'w',encoding='utf-8') as fh:
-    json.dump(cfg, fh, ensure_ascii=False)
+out.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding='utf-8')
+
+transport = (outbound.get('transport') or {}).get('type', 'tcp')
+security = 'tls' if (outbound.get('tls') or {}).get('enabled') else 'none'
+with meta.open('w', encoding='utf-8') as f:
+    print('mode=fragment', file=f)
+    print(f'tag={tag}', file=f)
+    print(f"protocol={outbound.get('type','unknown')}", file=f)
+    print(f"server={outbound.get('server','-')}", file=f)
+    print(f"port={outbound.get('server_port','-')}", file=f)
+    print(f'transport={transport}', file=f)
+    print(f'security={security}', file=f)
 PY
 
-    if ! "$SING_BOX" check -c "$generated" >"$run_dir/check.out" 2>&1; then
-        printf 'status=invalid\nreason=sing-box-check\n' > "$run_dir/result"
-        return 1
-    fi
+MODE="$(awk -F= '$1=="mode"{print $2}' "$META_FILE")"
+NAME="$(awk -F= '$1=="tag"{print $2}' "$META_FILE")"
+PROTOCOL="$(awk -F= '$1=="protocol"{print $2}' "$META_FILE")"
+SERVER="$(awk -F= '$1=="server"{print $2}' "$META_FILE")"
+SERVER_PORT="$(awk -F= '$1=="port"{print $2}' "$META_FILE")"
+TRANSPORT="$(awk -F= '$1=="transport"{print $2}' "$META_FILE")"
+SECURITY="$(awk -F= '$1=="security"{print $2}' "$META_FILE")"
 
-    "$SING_BOX" run -c "$generated" >"$run_dir/probe.out" 2>"$run_dir/probe.err" &
-    pid=$!
-
-    security="$(python3 - "$candidate" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as f:
-    d=json.load(f)
-print('tls' if (d.get('tls') or {}).get('enabled') else 'none')
-PY
-)"
-
-    if [[ "$security" == "tls" ]]; then
-        scheme="https"
-    else
-        scheme="http"
-    fi
-    test_url="${scheme}://example.com/"
-
-    # Do NOT use /dev/tcp or a raw readiness connection here. The mixed inbound
-    # expects a valid protocol handshake; a raw TCP connect creates misleading
-    # "malformed HTTP request" errors in sing-box logs. curl itself is both the
-    # readiness check and the actual application-layer probe.
-    start="$(date +%s%3N)"
-    set +e
-    timeout "$timeout_s" curl -fsS \
-        --proxy "socks5h://127.0.0.1:$socks_port" \
-        --connect-timeout "$timeout_s" \
-        --max-time "$timeout_s" \
-        -o /dev/null \
-        -w '%{http_code}\n' \
-        "$test_url" > "$run_dir/httpcode" 2>"$run_dir/curl.err"
-    curl_rc=$?
-    set -e
-    end="$(date +%s%3N)"
-    elapsed=$((end - start))
-
-    # sing-box may still be alive even if the local request failed. Always stop
-    # the temporary instance before returning.
-    code="$(cat "$run_dir/httpcode" 2>/dev/null || true)"
-    if (( curl_rc == 0 )) && [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
-        printf 'status=ok\nrtt=%s\nhttp=%s\nsecurity=%s\ntest_url=%s\n' \
-            "$elapsed" "$code" "$security" "$test_url" > "$run_dir/result"
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        return 0
-    fi
-
-    printf 'status=failed\nrtt=%s\nhttp=%s\ncurl_rc=%s\nsecurity=%s\ntest_url=%s\n' \
-        "$elapsed" "$code" "$curl_rc" "$security" "$test_url" > "$run_dir/result"
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    return 1
-}
-
-stage1_worker(){
-    local candidate="$1" idx="$2"
-    local meta name server port transport security run_dir result rtt status
-    run_dir="$WORK_DIR/stage1_${idx}_$$"
-    mkdir -p "$run_dir"
-
-    meta="$(metadata "$candidate" 2>/dev/null || true)"
-    [[ "$meta" == error=* ]] && { rm -rf "$run_dir"; return 0; }
-
-    name="$(awk -F= '$1=="name"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
-    server="$(awk -F= '$1=="server"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
-    port="$(awk -F= '$1=="port"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
-    transport="$(awk -F= '$1=="transport"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
-    security="$(awk -F= '$1=="security"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
-
-    # Suppress the function's numeric return code from reaching stdout. The
-    # diagnostic files remain available for failed candidates.
-    if probe_once "$candidate" "$STAGE1_TIMEOUT" "$run_dir" "$(next_port "$idx")" >/dev/null 2>&1; then
-        result="$(cat "$run_dir/result" 2>/dev/null || true)"
-        status="$(awk -F= '$1=="status"{print $2}' <<< "$result")"
-        rtt="$(awk -F= '$1=="rtt"{print $2}' <<< "$result")"
-        if [[ "$status" == ok ]] && is_number "$rtt"; then
-            printf '%s\t%s\t%s\t%s\t%s\t%s\tstage1\n' \
-                "$rtt" "$candidate" "$name" "$server" "$port" "$transport/$security" \
-                >> "$RESULT_FILE"
-        fi
-    fi
-
-    # Preserve only diagnostics after a failed probe; successful temporary
-    # probe directories are removed to keep SD-card I/O and storage low.
-    result="$(cat "$run_dir/result" 2>/dev/null || true)"
-    if [[ "$result" != status=ok* ]]; then
-        mkdir -p "$WORK_DIR/failures"
-        printf '%s\n' "$candidate" > "$WORK_DIR/failures/$(basename "$candidate").path"
-        cp -f "$run_dir/result" "$WORK_DIR/failures/$(basename "$candidate").result" 2>/dev/null || true
-        cp -f "$run_dir/curl.err" "$WORK_DIR/failures/$(basename "$candidate").curl.err" 2>/dev/null || true
-        cp -f "$run_dir/probe.err" "$WORK_DIR/failures/$(basename "$candidate").probe.err" 2>/dev/null || true
-    fi
-    rm -rf "$run_dir"
-}
-
-info "Validating ${#CANDIDATES[@]} generated candidates..."
-info "Stage 1: one real proxy response test per candidate (parallel=$PARALLEL)"
-
-running=0
-slot=0
-pids=()
-for candidate in "${CANDIDATES[@]}"; do
-    ((slot+=1))
-    stage1_worker "$candidate" "$(( (slot-1) % PARALLEL ))" &
-    pids+=("$!")
-    ((running+=1))
-    if ((running >= PARALLEL)); then
-        wait "${pids[0]}" 2>/dev/null || true
-        pids=("${pids[@]:1}")
-        ((running-=1))
-    fi
-done
-for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
-
-STAGE1_COUNT="$(wc -l < "$RESULT_FILE" | tr -d ' ')"
-info "Stage 1 valid: $STAGE1_COUNT / ${#CANDIDATES[@]}"
-(( STAGE1_COUNT > 0 )) || fatal "No candidate passed Stage 1. See cache/validator/failures/ for probe errors."
-
-none_values="$(awk -F'\t' '$6 ~ /\/none$/ {print $1}' "$RESULT_FILE" | sort -n || true)"
-tls_values="$(awk -F'\t' '$6 ~ /\/tls$/ {print $1}' "$RESULT_FILE" | sort -n || true)"
-median_stream(){ awk '{a[NR]=$1} END {if(NR==0) exit 1; if(NR%2) print a[(NR+1)/2]; else print (a[NR/2]+a[NR/2+1])/2}' ; }
-NONE_MEDIAN="$(printf '%s\n' "$none_values" | sed '/^$/d' | median_stream 2>/dev/null || true)"
-TLS_MEDIAN="$(printf '%s\n' "$tls_values" | sed '/^$/d' | median_stream 2>/dev/null || true)"
-NORMALIZE_OFFSET=0
-if is_number "$NONE_MEDIAN" && is_number "$TLS_MEDIAN"; then
-    NORMALIZE_OFFSET="$(awk -v n="$NONE_MEDIAN" -v t="$TLS_MEDIAN" 'BEGIN{d=t-n;if(d<0)d=-d;if(d>150)d=150;print d/2}')"
+###############################################################################
+# Validate config first.
+###############################################################################
+if ! "$SING_BOX" check -c "$CONFIG_FILE" >"$RUN_DIR/check.out" 2>&1; then
+    printf '\n[!] Configuration check failed\n' >&2
+    cat "$RUN_DIR/check.out" >&2
+    printf '\nDiagnostics: %s\n' "$RUN_DIR" >&2
+    exit 1
 fi
 
-STAGE2_LIST="$WORK_DIR/stage2.list"
-awk -F'\t' -v off="$NORMALIZE_OFFSET" \
-    'function adjusted(r,sec){if(sec ~ /\/none$/) return r+off; return r} {print adjusted($1,$6) "\t" $0}' \
-    "$RESULT_FILE" | sort -n -k1,1 | head -n "$TOP_CANDIDATES" | cut -f2- > "$STAGE2_LIST"
+###############################################################################
+# Port must be available.
+###############################################################################
+if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:)127\.0\.0\.1:'"$PORT"'$|(^|:)0\.0\.0\.0:'"$PORT"'$|(^|:)\[::\]:'"$PORT"'$'; then
+    fatal "Local test port $PORT is already in use. Use SINGTEST_PORT=<free-port>."
+fi
 
-STAGE2_COUNT="$(wc -l < "$STAGE2_LIST" | tr -d ' ')"
-info "Stage 2 candidates: $STAGE2_COUNT"
-(( STAGE2_COUNT > 0 )) || fatal "No candidates selected for Stage 2."
+###############################################################################
+# Start isolated sing-box and perform the same style of SOCKS test as test.sh.
+###############################################################################
+"$SING_BOX" run -c "$CONFIG_FILE" >"$LOG_FILE" 2>"$ERR_FILE" &
+PID=$!
 
-STAGE2_RESULT="$WORK_DIR/stage2.tsv"
-: > "$STAGE2_RESULT"
+info "Testing sing-box connectivity..."
+printf '  %-12s %s\n' 'Mode' "$MODE"
+printf '  %-12s %s\n' 'Outbound' "$NAME"
+printf '  %-12s %s\n' 'Protocol' "$PROTOCOL"
+printf '  %-12s %s:%s\n' 'Endpoint' "$SERVER" "$SERVER_PORT"
+printf '  %-12s %s/%s\n' 'Transport' "$TRANSPORT" "$SECURITY"
+printf '  %-12s %s\n' 'Target' "$TARGET_URL"
+printf '\n'
 
-stage2_worker(){
-    local row="$1" idx="$2"
-    local rtt0 candidate name server port transport_security transport security
-    IFS=$'\t' read -r rtt0 candidate name server port transport_security _ <<< "$row"
-    transport="${transport_security%/*}"
-    security="${transport_security##*/}"
-
-    local run_dir="$WORK_DIR/stage2_${idx}_$$"
-    mkdir -p "$run_dir"
-    local values=() i result rtt
-
-    for i in 1 2 3; do
-        local probe_dir="$run_dir/test_$i"
-        mkdir -p "$probe_dir"
-        if probe_once "$candidate" "$STAGE2_TIMEOUT" "$probe_dir" "$(next_port "$((100 + idx*3 + i))")" >/dev/null 2>&1; then
-            result="$(cat "$probe_dir/result" 2>/dev/null || true)"
-            rtt="$(awk -F= '$1=="rtt"{print $2}' <<< "$result")"
-            is_number "$rtt" && values+=("$rtt")
-        fi
-    done
-
-    if (( ${#values[@]} == 3 )); then
-        IFS=$'\n' sorted=($(printf '%s\n' "${values[@]}" | sort -n))
-        median="${sorted[1]}"
-        min="${sorted[0]}"
-        max="${sorted[2]}"
-        jitter="$(awk -v a="$min" -v b="$max" 'BEGIN{print b-a}')"
-        mean="$(awk -v a="${values[0]}" -v b="${values[1]}" -v c="${values[2]}" 'BEGIN{print (a+b+c)/3}')"
-        stability="$(awk -v m="$mean" -v j="$jitter" 'BEGIN{if(m<=0){print 0}else{s=100-(j/m*100);if(s<0)s=0;if(s>100)s=100;printf "%.2f",s}}')"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$median" "$jitter" "$stability" "$candidate" "$name" "$transport" "$security" \
-            >> "$STAGE2_RESULT"
+# Wait briefly for the actual SOCKS listener, not a fake TCP readiness probe.
+ready=0
+for _ in {1..20}; do
+    if ss -lnt 2>/dev/null | grep -Eq '[:.]'"$PORT"'[[:space:]]'; then
+        ready=1
+        break
     fi
-
-    rm -rf "$run_dir"
-}
-
-running=0
-slot=0
-pids=()
-while IFS= read -r row; do
-    ((slot+=1))
-    stage2_worker "$row" "$slot" &
-    pids+=("$!")
-    ((running+=1))
-    if ((running >= PARALLEL)); then
-        wait "${pids[0]}" 2>/dev/null || true
-        pids=("${pids[@]:1}")
-        ((running-=1))
+    if ! kill -0 "$PID" 2>/dev/null; then
+        break
     fi
-done < "$STAGE2_LIST"
-for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+    sleep 0.05
+done
 
-[[ -s "$STAGE2_RESULT" ]] || fatal "No candidate completed all three Stage 2 probes."
+if (( ready == 0 )); then
+    warning "sing-box test listener did not become ready"
+    [[ -s "$ERR_FILE" ]] && { printf '\n--- sing-box error ---\n' >&2; cat "$ERR_FILE" >&2; }
+    printf '\nDiagnostics: %s\n' "$RUN_DIR" >&2
+    exit 1
+fi
 
-ranked="$WORK_DIR/ranked.tsv"
-sort -t$'\t' -k3,3nr -k1,1n -k2,2n -k5,5 "$STAGE2_RESULT" > "$ranked"
+START_MS="$(date +%s%3N)"
+set +e
+curl -4 -L \
+    --max-time "$TIMEOUT" \
+    --connect-timeout 5 \
+    --socks5-hostname "127.0.0.1:$PORT" \
+    -sS -o /dev/null \
+    -w '%{http_code}' \
+    "$TARGET_URL" >"$HTTP_FILE" 2>"$CURL_ERR"
+CURL_RC=$?
+set -e
+END_MS="$(date +%s%3N)"
+RESPONSE_MS=$((END_MS-START_MS))
+HTTP_CODE="$(tr -d '\r\n ' < "$HTTP_FILE" 2>/dev/null || true)"
 
-rm -f "$VALIDATED_DIR"/*.json
-index="$VALIDATED_DIR/index.tsv"
-printf 'rank\tresponse_ms\tjitter_ms\tstability_pct\tcandidate\tname\ttransport\tsecurity\n' > "$index"
-rank=0
-while IFS=$'\t' read -r median jitter stability candidate name transport security; do
-    ((rank+=1))
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$rank" "$median" "$jitter" "$stability" "$candidate" "$name" "$transport" "$security" >> "$index"
-    cp "$candidate" "$VALIDATED_DIR/$(printf '%02d' "$rank")_$(basename "$candidate")"
-    (( rank >= FINAL_TOP )) && break
-done < "$ranked"
+if (( CURL_RC == 0 )) && [[ "$HTTP_CODE" =~ ^[23][0-9][0-9]$ ]]; then
+    printf '\n'
+    success "Connectivity PASS"
+    printf '  Response : %sms\n' "$RESPONSE_MS"
+    printf '  HTTP     : %s\n' "$HTTP_CODE"
+    printf '  Outbound : %s\n' "$NAME"
+    rm -rf "$RUN_DIR"
+    exit 0
+fi
 
-success "Validator complete: $STAGE1_COUNT valid -> $STAGE2_COUNT retested -> $rank selected"
-printf 'Results: %s\n' "$index"
-printf 'Normalization offset: %sms\n' "$NORMALIZE_OFFSET"
+printf '\n'
+warning "Connectivity FAIL"
+printf '  Response : %sms\n' "$RESPONSE_MS"
+printf '  HTTP     : %s\n' "${HTTP_CODE:-000}"
+printf '  Curl RC  : %s\n' "$CURL_RC"
+
+if [[ -s "$CURL_ERR" ]]; then
+    printf '\n--- curl error ---\n' >&2
+    cat "$CURL_ERR" >&2
+fi
+
+if [[ -s "$ERR_FILE" ]]; then
+    printf '\n--- sing-box error ---\n' >&2
+    cat "$ERR_FILE" >&2
+fi
+
+printf '\nDiagnostics: %s\n' "$RUN_DIR" >&2
+exit 1
