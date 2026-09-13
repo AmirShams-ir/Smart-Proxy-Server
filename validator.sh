@@ -4,9 +4,9 @@ set -Eeuo pipefail
 # ============================================================================
 # Smart Proxy Server - Stage 3 : Validation
 # ------------------------------------------------------------------------------
-# Thin parallel wrapper around singtest.sh.
+# Parallel wrapper around singtest.sh.
 # Reads generated JSON configs from cache/generated/,
-# reuses singtest.sh unchanged as the ONLY connectivity test engine,
+# reuses singtest.sh unchanged as the ONLY connectivity/RTT test engine,
 # and stores ONLY successful candidates sorted by RTT (ascending) in:
 #   cache/valid.csv
 #
@@ -23,21 +23,20 @@ INPUT_DIR="$BASE_DIR/cache/generated"
 OUTPUT_FILE="$BASE_DIR/cache/valid.csv"
 SINGTEST="$BASE_DIR/singtest.sh"
 
-# Keep the default conservative for Orange Pi. Override with:
+# Conservative default for Orange Pi. Override with:
 #   VALIDATOR_PARALLEL=8 bash validator.sh
 PARALLEL="${VALIDATOR_PARALLEL:-4}"
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
 info(){ printf '[*] %s\n' "$*"; }
 success(){ printf '[✓] %s\n' "$*"; }
-warning(){ printf '[!] %s\n' "$*" >&2; }
 
 require_cmd(){
     command -v "$1" >/dev/null 2>&1 || fatal "Required command not found: $1"
 }
 
 is_uint(){
-    [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ));
 }
 
 require_cmd awk
@@ -45,7 +44,6 @@ require_cmd find
 require_cmd mktemp
 require_cmd sort
 require_cmd wc
-require_cmd grep
 require_cmd python3
 
 [[ -f "$SINGTEST" ]] || fatal "singtest.sh not found: $SINGTEST"
@@ -84,11 +82,12 @@ extract_rtt(){
 validate_one(){
     local input="$1"
     local index="$2"
-    local profile log result rtt
+    local profile log result display rtt
 
     profile="$(basename "$input" .json)"
     log="$TMP_DIR/test-${index}.log"
     result="$RESULT_DIR/result-${index}.csv"
+    display="$RESULT_DIR/display-${index}.txt"
 
     # singtest.sh remains the ONLY connectivity/RTT test engine.
     if "$SINGTEST" "$input" >"$log" 2>&1; then
@@ -99,10 +98,10 @@ validate_one(){
 
     if [[ "$rtt" =~ ^[0-9]+$ ]]; then
         printf '%s,%s\n' "$profile" "$rtt" > "$result"
-        printf '%s|%s|%s\n' "$profile" "$rtt" "$index" > "$RESULT_DIR/display-${index}.txt"
+        printf '%s|%s|%s\n' "$profile" "$rtt" "$index" > "$display"
     else
         : > "$result"
-        printf '%s|-|%s\n' "$profile" "$index" > "$RESULT_DIR/display-${index}.txt"
+        printf '%s|-|%s\n' "$profile" "$index" > "$display"
     fi
 }
 
@@ -112,18 +111,25 @@ printf '\n'
 printf '%-56s %8s\n' 'Profile' 'RTT'
 printf '%s\n' '----------------------------------------------------------------'
 
-active=0
-for input in "${CANDIDATES[@]}"; do
-    active=$((active + 1))
-    validate_one "$input" "$active" &
+# Fixed worker pool. This avoids relying on shell job-counting behavior and
+# keeps the number of concurrent singtest/sing-box processes bounded.
+next_index=0
+running=0
 
-    while (( $(jobs -rp | wc -l) >= PARALLEL )); do
-        wait -n || true
+while (( next_index < ${#CANDIDATES[@]} || running > 0 )); do
+    while (( running < PARALLEL && next_index < ${#CANDIDATES[@]} )); do
+        next_index=$((next_index + 1))
+        validate_one "${CANDIDATES[$((next_index - 1))]}" "$next_index" &
+        running=$((running + 1))
     done
-done
-wait || true
 
-# Print results in deterministic candidate order, while CSV is RTT-sorted.
+    if (( running > 0 )); then
+        wait -n || true
+        running=$((running - 1))
+    fi
+done
+
+# Print every candidate deterministically by original input order.
 for display in "$RESULT_DIR"/display-*.txt; do
     [[ -f "$display" ]] || continue
     cat "$display"
@@ -142,7 +148,7 @@ TMP_OUTPUT="${OUTPUT_FILE}.tmp"
         [[ -s "$result" ]] || continue
         cat "$result"
     done | sort -t',' -k2,2n -k1,1
-} > "$TMP_OUTPUT"
+a} > "$TMP_OUTPUT"
 mv "$TMP_OUTPUT" "$OUTPUT_FILE"
 
 VALID_COUNT="$(($(wc -l < "$OUTPUT_FILE") - 1))"
