@@ -54,36 +54,97 @@ def load_ini(path):
             sec[cur][k.strip()]=v.strip()
     return sec
 
+def bool_value(v, default=False):
+    if v == "":
+        return default
+    return v.strip().lower() in {"1","true","yes","on"}
+
+def add_tls(outbound, local, sec, sni):
+    if sec != "tls":
+        return
+
+    tls={
+        "enabled": True,
+        "server_name": sni,
+        "insecure": bool_value(get(local,"AllowInsecure"), False),
+    }
+
+    alpn=split(get(local,"ALPN"))
+    if alpn:
+        tls["alpn"]=alpn
+
+    fingerprint=get(local,"Fingerprint","chrome")
+    if fingerprint:
+        tls["utls"]={
+            "enabled": True,
+            "fingerprint": fingerprint,
+        }
+
+    outbound["tls"]=tls
+
+def add_ws_transport(outbound, local, host):
+    path=get(local,"WSPath")
+    if not path:
+        return False
+
+    headers={"Host": get(local,"WSHost") or host}
+    transport={
+        "type":"ws",
+        "path":path,
+        "headers":headers,
+    }
+
+    max_early_data=get(local,"MaxEarlyData")
+    if max_early_data:
+        try:
+            transport["max_early_data"]=int(max_early_data)
+        except ValueError:
+            pass
+
+    early_data_header_name=get(local,"EarlyDataHeaderName")
+    if early_data_header_name:
+        transport["early_data_header_name"]=early_data_header_name
+
+    outbound["transport"]=transport
+    return True
+
+def add_grpc_transport(outbound, local):
+    svc=get(local,"GRPCServiceName")
+    if not svc:
+        return False
+    outbound["transport"]={
+        "type":"grpc",
+        "service_name":svc,
+    }
+    return True
+
 edges=[]
 with EDGE_FILE.open() as f:
     r=csv.DictReader(f)
     for row in r:
-        edges.append(row["ip"])
+        ip=row.get("ip","").strip()
+        if ip:
+            edges.append(ip)
 
 created=0
 workers=0
 
 for tpl in sorted(TEMPLATE_DIR.glob("*.conf")):
-
     cfg=load_ini(tpl)
-
     if "worker" not in cfg:
         continue
 
     workers+=1
-
     worker=cfg["worker"]
 
     NAME=get(worker,"Name")
     HOST=get(worker,"Host")
     SNI=get(worker,"SNI") or HOST
-
     PORTS=[int(x) for x in split(get(worker,"Ports"))]
 
     summary=[]
 
     for proto in ("vless","trojan"):
-
         if proto not in cfg:
             continue
 
@@ -92,20 +153,14 @@ for tpl in sorted(TEMPLATE_DIR.glob("*.conf")):
 
         transports=split(get(local,"Transport"))
         securitys=split(get(local,"Security"))
-
         count=0
 
         for edge,port,transport,sec in itertools.product(edges,PORTS,transports,securitys):
-
-            # ------------------------------------------------------
             # Cloudflare Port Policy
-            # ------------------------------------------------------
             if port in HTTPS_PORTS and sec!="tls":
                 continue
-
             if port in HTTP_PORTS and sec!="none":
                 continue
-
             if port not in HTTP_PORTS and port not in HTTPS_PORTS:
                 continue
 
@@ -113,7 +168,7 @@ for tpl in sorted(TEMPLATE_DIR.glob("*.conf")):
                 "tag":f"{NAME}_{proto}",
                 "type":proto,
                 "server":edge,
-                "server_port":port
+                "server_port":port,
             }
 
             if proto=="vless":
@@ -121,46 +176,21 @@ for tpl in sorted(TEMPLATE_DIR.glob("*.conf")):
                 flow=get(local,"Flow")
                 if flow:
                     outbound["flow"]=flow
+                packet_encoding=get(local,"PacketEncoding") or get(local,"Packet_Encoding")
+                if packet_encoding:
+                    outbound["packet_encoding"]=packet_encoding
             else:
                 outbound["password"]=get(local,"Password") or get(local,"TrojanPassword")
 
-            # TLS
-            if sec=="tls":
-                outbound["tls"]={
-                    "enabled":True,
-                    "server_name":SNI,
-                    "utls":{
-                        "enabled":True,
-                        "fingerprint":get(local,"Fingerprint","chrome")
-                    }
-                }
+            add_tls(outbound, local, sec, SNI)
 
-            # Transport
             transport=transport.lower()
-
             if transport=="ws":
-
-                path=get(local,"WSPath")
-                if not path:
+                if not add_ws_transport(outbound, local, HOST):
                     continue
-
-                outbound["transport"]={
-                    "type":"ws",
-                    "path":path,
-                    "headers":{"Host":HOST}
-                }
-
             elif transport=="grpc":
-
-                svc=get(local,"GRPCServiceName")
-                if not svc:
+                if not add_grpc_transport(outbound, local):
                     continue
-
-                outbound["transport"]={
-                    "type":"grpc",
-                    "service_name":svc
-                }
-
             elif transport!="tcp":
                 continue
 
