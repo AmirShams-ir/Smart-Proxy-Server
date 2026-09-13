@@ -22,10 +22,16 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="$BASE_DIR/cache/generated"
 OUTPUT_FILE="$BASE_DIR/cache/valid.csv"
 SINGTEST="$BASE_DIR/singtest.sh"
+DEFAULTS_FILE="$BASE_DIR/config/defaults.conf"
 
-# Conservative default for Orange Pi. Override with:
-#   VALIDATOR_PARALLEL=8 bash validator.sh
-PARALLEL="${VALIDATOR_PARALLEL:-4}"
+if [[ -n "${VALIDATOR_PARALLEL:-}" ]]; then
+    PARALLEL="$VALIDATOR_PARALLEL"
+elif [[ -f "$DEFAULTS_FILE" ]]; then
+    PARALLEL="$(awk -F= '$1=="VALIDATOR_PARALLEL"{v=$0; sub(/^[^=]*=/,"",v); gsub(/^ +| +$/,"",v); print v; exit}' "$DEFAULTS_FILE")"
+    PARALLEL="${PARALLEL:-4}"
+else
+    PARALLEL=4
+fi
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
 info(){ printf '[*] %s\n' "$*"; }
@@ -111,11 +117,8 @@ printf '\n'
 printf '%-56s %8s\n' 'Profile' 'RTT'
 printf '%s\n' '----------------------------------------------------------------'
 
-# Fixed worker pool. This avoids relying on shell job-counting behavior and
-# keeps the number of concurrent singtest/sing-box processes bounded.
 next_index=0
 running=0
-
 while (( next_index < ${#CANDIDATES[@]} || running > 0 )); do
     while (( running < PARALLEL && next_index < ${#CANDIDATES[@]} )); do
         next_index=$((next_index + 1))
@@ -129,7 +132,6 @@ while (( next_index < ${#CANDIDATES[@]} || running > 0 )); do
     fi
 done
 
-# Print every candidate deterministically by original input order.
 for display in "$RESULT_DIR"/display-*.txt; do
     [[ -f "$display" ]] || continue
     cat "$display"
