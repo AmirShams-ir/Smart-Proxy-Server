@@ -3,15 +3,23 @@ set -Eeuo pipefail
 
 # ============================================================================
 # Smart Proxy Server - Candidate Validator
+# Stage 1: fast connectivity validation
 #
-# Stage 1:
-#   cache/generated/*.json -> fast real-proxy connectivity test (parallel=6)
-#   -> cache/validated/index.tsv
+# Pipeline:
+#   cache/generated/*.json
+#          |
+#      Parallel=6
+#          |
+#      singtest-style probe
+#          |
+#   cache/validated/index.tsv
 #
-# This validator intentionally keeps Stage 1 simple. Each generated outbound
-# fragment is wrapped in a temporary sing-box config and tested using the same
-# SOCKS5/curl method as test.sh. Stage 2 scoring can be added on this stable
-# foundation later.
+# Output:
+#   Terminal: Profile / RTT / Jitter / Score
+#   index.tsv: Rank / Profile / RTT / Jitter / Score
+#
+# Stage 1 deliberately keeps Jitter=0 and Score=RTT.
+# Repeated probes and real jitter/score calculation belong to Stage 2.
 # ============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +29,7 @@ GENERATED_DIR="$BASE_DIR/cache/generated"
 VALIDATED_DIR="$BASE_DIR/cache/validated"
 WORK_DIR="$BASE_DIR/cache/validator"
 RESULT_FILE="$WORK_DIR/results.tsv"
+INDEX_FILE="$VALIDATED_DIR/index.tsv"
 LOCK_FILE="/run/smartproxy-validator.lock"
 LOCK_META="/run/smartproxy-validator.lock.info"
 
@@ -28,6 +37,7 @@ PARALLEL="${VALIDATOR_PARALLEL:-6}"
 TIMEOUT="${VALIDATOR_STAGE1_TIMEOUT:-8}"
 SING_BOX="${SING_BOX_BIN:-sing-box}"
 TARGET_URL="${VALIDATOR_URL:-https://cp.cloudflare.com/generate_204}"
+BASE_PORT="${VALIDATOR_BASE_PORT:-19080}"
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
 warning(){ printf '[!] %s\n' "$*" >&2; }
@@ -37,7 +47,7 @@ require_cmd(){ command -v "$1" >/dev/null 2>&1 || fatal "Missing required comman
 is_number(){ [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 
 mkdir -p "$VALIDATED_DIR" "$WORK_DIR" "$WORK_DIR/failures"
-rm -f "$RESULT_FILE" "$VALIDATED_DIR"/*.json
+rm -f "$RESULT_FILE" "$INDEX_FILE" "$VALIDATED_DIR"/*.json
 : > "$RESULT_FILE"
 
 exec 9>"$LOCK_FILE"
@@ -60,6 +70,7 @@ require_cmd curl
 require_cmd ss
 require_cmd flock
 require_cmd sleep
+require_cmd date
 
 [[ -d "$GENERATED_DIR" ]] || fatal "Missing generated candidate directory: $GENERATED_DIR"
 
@@ -69,8 +80,7 @@ shopt -u nullglob
 [[ ${#CANDIDATES[@]} -gt 0 ]] || fatal "No JSON candidates found in $GENERATED_DIR"
 
 (( PARALLEL > 0 )) || fatal "VALIDATOR_PARALLEL must be > 0"
-
-next_port(){ echo $((19080 + $1)); }
+(( BASE_PORT > 1024 && BASE_PORT < 65000 )) || fatal "VALIDATOR_BASE_PORT is invalid: $BASE_PORT"
 
 metadata(){
     python3 - "$1" <<'PY'
@@ -87,14 +97,18 @@ print(f"security={'tls' if tls.get('enabled') else 'none'}")
 PY
 }
 
+probe_port(){
+    local slot="$1"
+    echo $((BASE_PORT + slot))
+}
+
 probe_once(){
     local candidate="$1" timeout_s="$2" run_dir="$3" socks_port="$4"
     local config="$run_dir/config.json"
-    local pid="" start_ms end_ms response_ms curl_rc http_code selected_tag
+    local pid="" start_ms end_ms response_ms curl_rc http_code
 
     python3 - "$candidate" "$config" "$socks_port" <<'PY'
-import json
-import sys
+import json, sys
 from pathlib import Path
 
 src = Path(sys.argv[1])
@@ -130,20 +144,19 @@ cfg = {
 }
 
 out.write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-print(tag)
 PY
 
-    selected_tag="$(tail -n 1 "$run_dir/config.json" 2>/dev/null || true)"
     if ! "$SING_BOX" check -c "$config" >"$run_dir/check.out" 2>&1; then
-        printf 'status=invalid\nrtt=\nhttp=\nreason=sing-box-check\n' > "$run_dir/result"
+        printf 'status=invalid\nrtt=0\nhttp=000\nreason=sing-box-check\n' > "$run_dir/result"
         return 1
     fi
 
     "$SING_BOX" run -c "$config" >"$run_dir/probe.out" 2>"$run_dir/probe.err" &
     pid=$!
 
-    ready=0
-    for _ in {1..20}; do
+    # Wait only for the actual SOCKS listener. No raw protocol request is used.
+    local ready=0
+    for _ in {1..40}; do
         if ss -lnt 2>/dev/null | grep -Eq '(^|:)127\.0\.0\.1:'"$socks_port"'[[:space:]]|(^|:)0\.0\.0\.0:'"$socks_port"'[[:space:]]'; then
             ready=1
             break
@@ -190,8 +203,8 @@ PY
 }
 
 stage1_worker(){
-    local candidate="$1" idx="$2"
-    local run_dir="$WORK_DIR/stage1_${idx}_$$"
+    local candidate="$1" slot="$2"
+    local run_dir="$WORK_DIR/stage1_${slot}_$$"
     local meta name server port transport security result status rtt
     mkdir -p "$run_dir"
 
@@ -206,13 +219,13 @@ stage1_worker(){
     transport="$(awk -F= '$1=="transport"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
     security="$(awk -F= '$1=="security"{print substr($0,index($0,"=")+1)}' <<< "$meta")"
 
-    if probe_once "$candidate" "$TIMEOUT" "$run_dir" "$(next_port "$idx")" >/dev/null 2>&1; then
+    if probe_once "$candidate" "$TIMEOUT" "$run_dir" "$(probe_port "$slot")" >/dev/null 2>&1; then
         result="$(cat "$run_dir/result" 2>/dev/null || true)"
         status="$(awk -F= '$1=="status"{print $2}' <<< "$result")"
         rtt="$(awk -F= '$1=="rtt"{print $2}' <<< "$result")"
         if [[ "$status" == ok ]] && is_number "$rtt"; then
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$rtt" "$candidate" "$name" "$transport/$security" "$server:$port" "stage1" >> "$RESULT_FILE"
+                "$rtt" "$candidate" "$name" "$transport/$security" "$server:$port" "PASS" >> "$RESULT_FILE"
         fi
     fi
 
@@ -229,16 +242,18 @@ stage1_worker(){
 }
 
 info "Validating ${#CANDIDATES[@]} generated candidates..."
-info "Stage 1: fast real-proxy connectivity test (parallel=$PARALLEL)"
-printf '  %-3s %-48s %-8s %-8s %-20s\n' 'Run' 'Profile' 'RTT' 'Status' 'Endpoint'
-printf '  %-3s %-48s %-8s %-8s %-20s\n' '---' '-----------------------------------------------' '-------' '------' '-------------------'
+info "Stage 1: fast singtest-style connectivity (parallel=$PARALLEL)"
+printf '\n'
+printf '%-52s %-8s %-8s %-10s\n' 'Profile' 'RTT' 'Jitter' 'Score'
+printf '%-52s %-8s %-8s %-10s\n' '----------------------------------------------------' '--------' '--------' '----------'
 
 pids=()
 slot=0
 running=0
 for candidate in "${CANDIDATES[@]}"; do
     ((slot+=1))
-    stage1_worker "$candidate" "$(( (slot-1) % PARALLEL ))" &
+    current_slot=$(( (slot - 1) % PARALLEL ))
+    stage1_worker "$candidate" "$current_slot" &
     pids+=("$!")
     ((running+=1))
 
@@ -256,31 +271,19 @@ done
 STAGE1_COUNT="$(wc -l < "$RESULT_FILE" | tr -d ' ')"
 TOTAL="${#CANDIDATES[@]}"
 
-if (( STAGE1_COUNT == 0 )); then
-    printf '\n'
-    fatal "No candidate passed Stage 1. See cache/validator/failures/"
-fi
+(( STAGE1_COUNT > 0 )) || fatal "No candidate passed Stage 1. See cache/validator/failures/"
 
-###############################################################################
-# Build validated index.
-# For this fast stage: Score = RTT and Jitter = 0. Stage 2 will replace these
-# with repeated measurements and a real score.
-###############################################################################
-INDEX_FILE="$VALIDATED_DIR/index.tsv"
+# Build validated index. Stage 1 intentionally uses Jitter=0 and Score=RTT.
 printf 'Rank\tProfile\tRTT\tJitter\tScore\n' > "$INDEX_FILE"
 
 rank=0
-sort -t$'\t' -k1,1n "$RESULT_FILE" | while IFS=$'\t' read -r rtt candidate name transport endpoint stage; do
-    ((rank+=1))
+while IFS=$'\t' read -r rtt candidate name transport endpoint status; do
+    rank=$((rank + 1))
     score="$(awk -v r="$rtt" 'BEGIN{printf "%.2f", r}')"
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-        "$rank" "$name" "$rtt" "0" "$score" >> "$INDEX_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$rank" "$name" "$rtt" "0" "$score" >> "$INDEX_FILE"
     cp -f "$candidate" "$VALIDATED_DIR/$(printf '%03d_%s' "$rank" "$(basename "$candidate")")"
-done
+done < <(sort -t$'\t' -k1,1n "$RESULT_FILE")
 
-###############################################################################
-# Human-readable result table.
-###############################################################################
 printf '\n'
 success "Validator complete"
 printf '  Candidates : %s\n' "$TOTAL"
@@ -288,9 +291,9 @@ printf '  Valid      : %s\n' "$STAGE1_COUNT"
 printf '  Parallel   : %s\n' "$PARALLEL"
 printf '  Target     : %s\n' "$TARGET_URL"
 printf '\n'
-printf '%-5s %-52s %-8s %-8s %-8s\n' 'Rank' 'Profile' 'RTT' 'Jitter' 'Score'
-printf '%-5s %-52s %-8s %-8s %-8s\n' '-----' '----------------------------------------------------' '--------' '--------' '--------'
+printf '%-52s %-8s %-8s %-10s\n' 'Profile' 'RTT' 'Jitter' 'Score'
+printf '%-52s %-8s %-8s %-10s\n' '----------------------------------------------------' '--------' '--------' '----------'
 
-awk -F'\t' 'NR>1 {printf "%-5s %-52s %-8s %-8s %-8s\n", $1,$2,$3,$4,$5}' "$INDEX_FILE"
+awk -F'\t' 'NR>1 {printf "%-52s %-8s %-8s %-10s\n", $2,$3,$4,$5}' "$INDEX_FILE"
 printf '\nIndex: %s\n' "$INDEX_FILE"
 printf 'Failures: %s\n' "$WORK_DIR/failures"
