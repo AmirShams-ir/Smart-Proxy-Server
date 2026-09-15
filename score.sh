@@ -40,7 +40,6 @@ require_cmd "$SING_BOX"
 [[ -f "$SPEEDTEST" ]] || fatal "speedtest.sh not found: $SPEEDTEST"
 [[ -d "$VALIDATED_DIR" ]] || fatal "Validated directory not found: $VALIDATED_DIR"
 
-# Do not depend on Git executable bits.
 SPEEDTEST_CMD=(bash "$SPEEDTEST")
 
 mkdir -p "$WINNER_DIR" "$(dirname "$CSV_FILE")"
@@ -64,12 +63,7 @@ printf '  Validated : %s\n' "$VALIDATED_DIR"
 printf '  Speedtest : bash %s\n' "$SPEEDTEST"
 printf '  Weights   : Down=%s%% Up=%s%% RTT=%s%%\n\n' "$DOWNLOAD_WEIGHT" "$UPLOAD_WEIGHT" "$RTT_WEIGHT"
 
-profile_name(){
-    # Keep the complete filename because maker.sh encodes protocol/edge/port/
-    # transport/security in it. This prevents all BPB_trojan profiles collapsing
-    # into the same display name.
-    basename "$1" .json
-}
+profile_name(){ basename "$1" .json; }
 
 measure_rtt(){
     local input="$1" port="$2" run_dir="$TMP_DIR/rtt-$port"
@@ -177,8 +171,8 @@ for line in results.read_text(encoding='utf-8').splitlines():
         rtt_val=None if rtt == '-' else float(rtt)
         rows.append({'path':path,'name':name,'rtt':rtt_val,'download':float(down),'upload':float(up)})
 
-# Only candidates with valid RTT are rankable. A failed RTT must not become RTT=0,
-# because 0 ms would otherwise be interpreted as the best possible latency.
+# Only candidates with a valid RTT are rankable. A failed RTT must never become
+# RTT=0 because 0 ms would otherwise be interpreted as the best latency.
 rankable=[r for r in rows if r['rtt'] is not None and r['rtt']>0]
 max_down=max((r['download'] for r in rankable),default=0.0)
 max_up=max((r['upload'] for r in rankable),default=0.0)
