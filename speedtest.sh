@@ -232,21 +232,30 @@ DOWNLOAD_MBPS="$(awk -v b="$DOWNLOAD_BYTES_DONE" -v s="$DOWNLOAD_SECONDS" 'BEGIN
 
 ###############################################################################
 # Upload
+#
+# IMPORTANT: measure actual curl transfer counters rather than assuming the
+# whole local payload was transmitted.
 ###############################################################################
 head -c "$UPLOAD_BYTES" /dev/zero > "$UPLOAD_FILE"
 : > "$UPLOAD_ERR"
 UPLOAD_START="$(date +%s%N)"
 set +e
-UPLOAD_HTTP="$(curl -4 --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
+UPLOAD_META="$(curl -4 --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
     --socks5-hostname "127.0.0.1:$PORT" \
-    -sS -o /dev/null -w '%{http_code}' \
+    -sS -o /dev/null \
+    -w '%{http_code} %{size_upload} %{time_total}' \
     -X POST --data-binary "@$UPLOAD_FILE" \
     "$UPLOAD_URL" 2>"$UPLOAD_ERR")"
 UPLOAD_RC=$?
 set -e
 UPLOAD_END="$(date +%s%N)"
-UPLOAD_BYTES_SENT="$(wc -c < "$UPLOAD_FILE" 2>/dev/null || printf '0')"
-UPLOAD_SECONDS="$(awk -v a="$UPLOAD_START" -v b="$UPLOAD_END" 'BEGIN{printf "%.3f", (b-a)/1000000000}')"
+
+UPLOAD_HTTP="$(awk '{print $1}' <<<"$UPLOAD_META")"
+UPLOAD_BYTES_SENT="$(awk '{printf "%.0f", $2}' <<<"$UPLOAD_META")"
+UPLOAD_SECONDS="$(awk '{print $3}' <<<"$UPLOAD_META")"
+
+[[ "$UPLOAD_BYTES_SENT" =~ ^[0-9]+$ ]] || UPLOAD_BYTES_SENT=0
+[[ "$UPLOAD_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || UPLOAD_SECONDS="$(awk -v a="$UPLOAD_START" -v b="$UPLOAD_END" 'BEGIN{printf "%.3f", (b-a)/1000000000}')"
 UPLOAD_SPEED_MBPS="$(awk -v b="$UPLOAD_BYTES_SENT" -v s="$UPLOAD_SECONDS" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0.00"}')"
 
 format_bytes(){
@@ -275,9 +284,9 @@ UPLOAD_OK=false
 [[ "$DOWNLOAD_RC" -eq 0 && "$DOWNLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$DOWNLOAD_BYTES_DONE" -gt 0 ]] && DOWNLOAD_OK=true
 [[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]] && UPLOAD_OK=true
 
-# Upload may time out after the complete request body was sent and the remote
-# endpoint has not finished responding. Count this as valid upload throughput
-# only when the request had a successful 2xx/3xx response and bytes were sent.
+# curl may time out after the complete request body was transmitted and the
+# server is still processing its response. Accept only when curl reports a
+# successful HTTP response and a non-zero actual upload counter.
 if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]]; then
     UPLOAD_OK=true
 fi
