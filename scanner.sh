@@ -7,14 +7,14 @@ set -Eeuo pipefail
 # Stage 1 of the Intelligence Proxy Engine.
 #
 # Reads Cloudflare ASN/CIDR source files, generates real host addresses, probes
-# them quickly and writes ONLY the selected IP addresses to cache/edges.csv.
+# them quickly and writes ONLY the selected IP addresses to cache/edge.csv.
 # The console report retains RTT, jitter, loss, colo and score for debugging.
 # ==============================================================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${BASE_DIR}/config"
 CACHE_DIR="${BASE_DIR}/cache"
-OUTPUT_FILE="${CACHE_DIR}/edges.csv"
+OUTPUT_FILE="${CACHE_DIR}/edge.csv"
 
 IPV4_FILE="${CONFIG_DIR}/cf-ipv4.txt"
 IPV6_FILE="${CONFIG_DIR}/cf-ipv6.txt"
