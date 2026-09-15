@@ -55,13 +55,6 @@ trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 RESULTS="$TMP_DIR/results.tsv"
 : > "$RESULTS"
 
-###############################################################################
-# Import validator RTT data once.
-# Supports common validator.csv layouts:
-#   Profile,RTT
-#   Rank,Profile,RTT,...
-# and tab-separated equivalents.
-###############################################################################
 python3 - "$VALID_CSV" "$TMP_DIR/validator.tsv" <<'PY'
 import csv
 import re
@@ -82,7 +75,6 @@ except csv.Error:
 
 rows = list(csv.reader(lines, delimiter=delimiter))
 header = [c.strip().lower() for c in rows[0]]
-
 profile_idx = None
 rtt_idx = None
 for i, col in enumerate(header):
@@ -91,7 +83,6 @@ for i, col in enumerate(header):
     if col in ('rtt', 'rtt_ms', 'latency', 'latency_ms'):
         rtt_idx = i
 
-# Header-less fallback: profile first, RTT second.
 data_rows = rows[1:] if profile_idx is not None or rtt_idx is not None else rows
 profile_idx = 0 if profile_idx is None else profile_idx
 rtt_idx = 1 if rtt_idx is None else rtt_idx
@@ -122,9 +113,6 @@ printf '  Weights   : Down=%s%% Up=%s%% RTT=%s%%\n\n' "$DOWNLOAD_WEIGHT" "$UPLOA
 
 profile_name(){ basename "$1" .json; }
 
-###############################################################################
-# Cheap gate from validator.csv, then expensive transfer test.
-###############################################################################
 printf '%-58s %8s %10s %10s %8s %10s\n' 'Profile' 'RTT(ms)' 'Download' 'Upload' 'Score' 'Status'
 printf '%s\n' '--------------------------------------------------------------------------------------------------------------------'
 
@@ -139,7 +127,6 @@ for input in "${CONFIGS[@]}"; do
     if [[ ! "$rtt" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v x="$rtt" 'BEGIN{exit !(x>0)}'; then
         printf '%s\t%s\t%s\t0\t0\tINVALID_RTT\n' "$input" "$name" "-" >> "$RESULTS"
         printf '%-58s %8s %10s %10s %8s %10s\n' "$name" '-' '-' '-' '0.00' 'SKIP'
-        printf '[*] [%s/%s] No valid RTT from validator; skipping Download/Upload for %s\n' "$index" "$CONFIG_COUNT" "$name" >&2
         continue
     fi
 
@@ -155,31 +142,33 @@ for input in "${CONFIGS[@]}"; do
 
     download="$(awk '/^Download[[:space:]]+[0-9.]+ Mbps/{print $2; exit}' "$out" 2>/dev/null || true)"
     upload="$(awk '/^Upload[[:space:]]+[0-9.]+ Mbps/{print $2; exit}' "$out" 2>/dev/null || true)"
-    download_http="$(awk '$1=="Download" && $2=="HTTP" {print $3; exit}' "$out" 2>/dev/null || true)"
-    upload_http="$(awk '$1=="Upload" && $2=="HTTP" {print $3; exit}' "$out" 2>/dev/null || true)"
     [[ "$download" =~ ^[0-9]+([.][0-9]+)?$ ]] || download=0
     [[ "$upload" =~ ^[0-9]+([.][0-9]+)?$ ]] || upload=0
 
-    status='OK'
-    if [[ "$download" == "0" || "$upload" == "0" ]]; then
-        status='INVALID_SPEED'
-    elif (( speed_rc != 0 )); then
+    # A speed result is rankable only when both directions are positive and
+    # speedtest.sh reported a successful completion. No partial measurement
+    # may enter the normalization pool.
+    if (( speed_rc == 0 )) && awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u>0)}'; then
+        status='OK'
+    elif awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u>0)}'; then
         status='SPEEDTEST_RC'
+    elif awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d<=0 && u>0)}'; then
+        status='DOWNLOAD_FAIL'
+    elif awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u<=0)}'; then
+        status='UPLOAD_FAIL'
+    else
+        status='INVALID_SPEED'
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$input" "$name" "$rtt" "$download" "$upload" >> "$RESULTS"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$input" "$name" "$rtt" "$download" "$upload" "$status" >> "$RESULTS"
     printf '%-58s %8s %10s %10s %8s %10s\n' "$name" "$rtt" "$download" "$upload" '-' "$status"
 
     if [[ "$status" != 'OK' && -s "$err" ]]; then
         warning "$name: $status" >&2
         tail -n 3 "$err" >&2 || true
     fi
-
 done
 
-###############################################################################
-# Normalize and rank.
-###############################################################################
 python3 - "$RESULTS" "$CSV_FILE" "$WINNER_DIR" "$TOP_N" "$DOWNLOAD_WEIGHT" "$UPLOAD_WEIGHT" "$RTT_WEIGHT" <<'PY'
 import csv
 import math
@@ -197,18 +186,20 @@ rows=[]
 for line in results.read_text(encoding='utf-8').splitlines():
     if not line.strip():
         continue
-    path, name, rtt, down, up = line.split('\t')
+    path, name, rtt, down, up, status = line.split('\t')
     rows.append({
         'path': path,
         'name': name,
         'rtt': None if rtt == '-' else float(rtt),
         'download': float(down),
         'upload': float(up),
+        'status': status,
     })
 
 rankable = [
     r for r in rows
-    if r['rtt'] is not None and r['rtt'] > 0
+    if r['status'] == 'OK'
+    and r['rtt'] is not None and r['rtt'] > 0
     and r['download'] > 0 and r['upload'] > 0
 ]
 
@@ -221,9 +212,9 @@ for r in rows:
         r['score'] = 0.0
         continue
 
-    down_score = (r['download'] / max_down * 100.0) if max_down else 0.0
-    up_score = (r['upload'] / max_up * 100.0) if max_up else 0.0
-    rtt_score = (min_rtt / r['rtt'] * 100.0) if min_rtt and r['rtt'] else 0.0
+    down_score = r['download'] / max_down * 100.0 if max_down else 0.0
+    up_score = r['upload'] / max_up * 100.0 if max_up else 0.0
+    rtt_score = min_rtt / r['rtt'] * 100.0 if min_rtt and r['rtt'] else 0.0
 
     r['score'] = round(
         down_score * wd / 100.0
@@ -243,17 +234,14 @@ rows.sort(key=lambda r: (
 csv_file.parent.mkdir(parents=True, exist_ok=True)
 with csv_file.open('w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
-    writer.writerow(['Rank','Profile','RTT_ms','Download_Mbps','Upload_Mbps','Score','Eligible'])
+    writer.writerow(['Rank','Profile','RTT_ms','Download_Mbps','Upload_Mbps','Score','Eligible','Status'])
     for rank, r in enumerate(rows, 1):
         eligible = 'yes' if r['score'] > 0 else 'no'
         writer.writerow([
-            rank,
-            r['name'],
+            rank, r['name'],
             f"{r['rtt']:.2f}" if r['rtt'] is not None else '-',
-            f"{r['download']:.2f}",
-            f"{r['upload']:.2f}",
-            f"{r['score']:.2f}",
-            eligible,
+            f"{r['download']:.2f}", f"{r['upload']:.2f}",
+            f"{r['score']:.2f}", eligible, r['status'],
         ])
 
 for old in winner_dir.glob('*.json'):
@@ -267,10 +255,7 @@ print(f"{'Rank':>4} {'Profile':<58} {'RTT(ms)':>8} {'Download':>10} {'Upload':>1
 print('-'*106)
 for rank, r in enumerate(rows, 1):
     rtt = '-' if r['rtt'] is None else f"{r['rtt']:.2f}"
-    print(
-        f"{rank:>4} {r['name']:<58} {rtt:>8} "
-        f"{r['download']:>10.2f} {r['upload']:>10.2f} {r['score']:>8.2f}"
-    )
+    print(f"{rank:>4} {r['name']:<58} {rtt:>8} {r['download']:>10.2f} {r['upload']:>10.2f} {r['score']:>8.2f}")
 
 print(f"Eligible profiles: {len(selected)}/{len(rows)}")
 PY
