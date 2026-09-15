@@ -243,7 +243,7 @@ set +e
 UPLOAD_META="$(curl -4 --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
     --socks5-hostname "127.0.0.1:$PORT" \
     -sS -o /dev/null \
-    -w '%{http_code} %{size_upload} %{time_total}' \
+    -w '%{http_code} %{size_upload} %{time_total} %{speed_upload}' \
     -X POST --data-binary "@$UPLOAD_FILE" \
     "$UPLOAD_URL" 2>"$UPLOAD_ERR")"
 UPLOAD_RC=$?
@@ -253,10 +253,14 @@ UPLOAD_END="$(date +%s%N)"
 UPLOAD_HTTP="$(awk '{print $1}' <<<"$UPLOAD_META")"
 UPLOAD_BYTES_SENT="$(awk '{printf "%.0f", $2}' <<<"$UPLOAD_META")"
 UPLOAD_SECONDS="$(awk '{print $3}' <<<"$UPLOAD_META")"
+UPLOAD_CURL_SPEED="$(awk '{print $4}' <<<"$UPLOAD_META")"
 
 [[ "$UPLOAD_BYTES_SENT" =~ ^[0-9]+$ ]] || UPLOAD_BYTES_SENT=0
 [[ "$UPLOAD_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || UPLOAD_SECONDS="$(awk -v a="$UPLOAD_START" -v b="$UPLOAD_END" 'BEGIN{printf "%.3f", (b-a)/1000000000}')"
-UPLOAD_SPEED_MBPS="$(awk -v b="$UPLOAD_BYTES_SENT" -v s="$UPLOAD_SECONDS" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0.00"}')"
+[[ "$UPLOAD_CURL_SPEED" =~ ^[0-9]+([.][0-9]+)?$ ]] || UPLOAD_CURL_SPEED=0
+
+UPLOAD_SPEED_MBPS="$(awk -v b="$UPLOAD_BYTES_SENT" -v s="$UPLOAD_SECONDS" 'BEGIN{if(s>0) printf "%.2f",(b*8/1000000)/s; else print "0.00"}')"
+UPLOAD_CURL_MBPS="$(awk -v bps="$UPLOAD_CURL_SPEED" 'BEGIN{printf "%.2f", bps*8/1000000}')"
 
 format_bytes(){
     awk -v n="${1:-0}" 'BEGIN {
@@ -274,6 +278,7 @@ printf '%-18s %s\n' 'Download time' "${DOWNLOAD_SECONDS}s"
 printf '%-18s %s\n' 'Download HTTP' "${DOWNLOAD_HTTP:-000}"
 printf '%s\n' '------------------------------------------------------------'
 printf '%-18s %s\n' 'Upload' "${UPLOAD_SPEED_MBPS} Mbps"
+printf '%-18s %s\n' 'Upload curl' "${UPLOAD_CURL_MBPS} Mbps"
 printf '%-18s %s\n' 'Uploaded' "$(format_bytes "$UPLOAD_BYTES_SENT")"
 printf '%-18s %s\n' 'Upload time' "${UPLOAD_SECONDS}s"
 printf '%-18s %s\n' 'Upload HTTP' "${UPLOAD_HTTP:-000}"
@@ -282,12 +287,11 @@ printf '%s\n' '============================================================'
 DOWNLOAD_OK=false
 UPLOAD_OK=false
 [[ "$DOWNLOAD_RC" -eq 0 && "$DOWNLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$DOWNLOAD_BYTES_DONE" -gt 0 ]] && DOWNLOAD_OK=true
-[[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]] && UPLOAD_OK=true
+[[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -eq "$UPLOAD_BYTES" ]] && UPLOAD_OK=true
 
-# curl may time out after the complete request body was transmitted and the
-# server is still processing its response. Accept only when curl reports a
-# successful HTTP response and a non-zero actual upload counter.
-if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]]; then
+# A response timeout is only accepted when the entire configured payload was
+# reported by curl as uploaded and the server returned a 2xx/3xx response.
+if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -eq "$UPLOAD_BYTES" ]]; then
     UPLOAD_OK=true
 fi
 
