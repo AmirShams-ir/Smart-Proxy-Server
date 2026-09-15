@@ -5,11 +5,6 @@ set -Eeuo pipefail
 # Smart Proxy Server - speedtest
 #
 # Fast download/upload throughput test for ONE sing-box config.
-# Uses the same transfer model as fulltest.sh, but with small payloads so a
-# slow proxy can return a useful result quickly on low-power devices.
-#
-# Usage:
-#   bash speedtest.sh cache/validated/profile.json
 # ============================================================================
 
 SING_BOX="${SING_BOX_BIN:-sing-box}"
@@ -46,6 +41,7 @@ require_cmd ss
 require_cmd awk
 require_cmd head
 require_cmd wc
+require_cmd date
 
 mkdir -p "$WORK_ROOT"
 RUN_DIR="$WORK_ROOT/run-$$"
@@ -219,15 +215,21 @@ fi
 # Download
 ###############################################################################
 DOWNLOAD_START="$(date +%s%N)"
+DOWNLOAD_FILE="$RUN_DIR/download.out"
+DOWNLOAD_ERR="$RUN_DIR/download.err"
+: > "$DOWNLOAD_FILE"
+: > "$DOWNLOAD_ERR"
+
 set +e
 DOWNLOAD_HTTP="$(curl -4 -L --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
     --socks5-hostname "127.0.0.1:$PORT" \
-    -sS -o "$RUN_DIR/download.out" -w '%{http_code}' \
-    "$DOWNLOAD_URL" 2>"$RUN_DIR/download.err")"
+    -sS -o "$DOWNLOAD_FILE" -w '%{http_code}' \
+    "$DOWNLOAD_URL" 2>"$DOWNLOAD_ERR")"
 DOWNLOAD_RC=$?
 set -e
+
 DOWNLOAD_END="$(date +%s%N)"
-DOWNLOAD_BYTES_DONE="$(wc -c < "$RUN_DIR/download.out" 2>/dev/null || printf '0')"
+DOWNLOAD_BYTES_DONE="$(wc -c < "$DOWNLOAD_FILE" 2>/dev/null || printf '0')"
 DOWNLOAD_SECONDS="$(awk -v a="$DOWNLOAD_START" -v b="$DOWNLOAD_END" 'BEGIN{printf "%.3f", (b-a)/1000000000}')"
 DOWNLOAD_MBPS="$(awk -v b="$DOWNLOAD_BYTES_DONE" -v s="$DOWNLOAD_SECONDS" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0.00"}')"
 
@@ -245,8 +247,8 @@ UPLOAD_HTTP="$(curl -4 --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
 UPLOAD_RC=$?
 set -e
 UPLOAD_END="$(date +%s%N)"
+UPLOAD_BYTES_SENT="$(wc -c < "$UPLOAD_FILE" 2>/dev/null || printf '0')"
 UPLOAD_SECONDS="$(awk -v a="$UPLOAD_START" -v b="$UPLOAD_END" 'BEGIN{printf "%.3f", (b-a)/1000000000}')"
-UPLOAD_BYTES_SENT="$(wc -c < "$UPLOAD_FILE")"
 UPLOAD_SPEED_MBPS="$(awk -v b="$UPLOAD_BYTES_SENT" -v s="$UPLOAD_SECONDS" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0.00"}')"
 
 format_bytes(){
@@ -273,11 +275,11 @@ printf '%s\n' '============================================================'
 DOWNLOAD_OK=false
 UPLOAD_OK=false
 [[ "$DOWNLOAD_RC" -eq 0 && "$DOWNLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$DOWNLOAD_BYTES_DONE" -gt 0 ]] && DOWNLOAD_OK=true
-[[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ ]] && UPLOAD_OK=true
+[[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]] && UPLOAD_OK=true
 
-# A timeout is acceptable for upload only when the server already returned a
-# successful HTTP status, because the request body may already be complete.
-if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ ]]; then
+# curl may hit a read timeout after the complete request body was already sent
+# while the remote endpoint is still processing/returning its response.
+if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]]; then
     UPLOAD_OK=true
 fi
 
@@ -287,9 +289,6 @@ if [[ "$DOWNLOAD_OK" == true && "$UPLOAD_OK" == true ]]; then
 fi
 
 warning "Speed test completed with warnings"
-(( DOWNLOAD_RC != 0 )) && [[ -s "$RUN_DIR/download.err" ]] && { printf 'Download error: '; tail -n 2 "$RUN_DIR/download.err"; }
+(( DOWNLOAD_RC != 0 )) && [[ -s "$DOWNLOAD_ERR" ]] && { printf 'Download error: '; tail -n 2 "$DOWNLOAD_ERR"; }
 (( UPLOAD_RC != 0 )) && [[ -s "$RUN_DIR/upload.err" ]] && { printf 'Upload note: '; tail -n 2 "$RUN_DIR/upload.err"; }
-
-# IMPORTANT: do not return success for an incomplete test. score.sh uses this
-# exit code together with measured bytes to classify the candidate.
 exit 1
