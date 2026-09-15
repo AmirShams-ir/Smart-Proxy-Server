@@ -10,19 +10,6 @@ set -Eeuo pipefail
 #
 # Usage:
 #   bash speedtest.sh cache/validated/profile.json
-#
-# Optional environment variables:
-#   SPEEDTEST_PORT=1235
-#   SPEEDTEST_TIMEOUT=15
-#   SPEEDTEST_DOWNLOAD_BYTES=1048576   # 1 MiB
-#   SPEEDTEST_UPLOAD_BYTES=524288      # 512 KiB
-#   SPEEDTEST_DOWNLOAD_URL=https://speed.cloudflare.com/__down?bytes=1048576
-#   SPEEDTEST_UPLOAD_URL=https://httpbin.org/post
-#
-# Important:
-#   Upload throughput is measured from the actual uploaded payload and the
-#   upload phase duration. A curl timeout after the payload has been sent is
-#   reported as a warning rather than making the entire test fail.
 # ============================================================================
 
 SING_BOX="${SING_BOX_BIN:-sing-box}"
@@ -229,7 +216,7 @@ if (( ready == 0 )); then
 fi
 
 ###############################################################################
-# Download - same architecture as fulltest.sh, but only 1 MiB by default.
+# Download
 ###############################################################################
 DOWNLOAD_START="$(date +%s%N)"
 set +e
@@ -245,9 +232,7 @@ DOWNLOAD_SECONDS="$(awk -v a="$DOWNLOAD_START" -v b="$DOWNLOAD_END" 'BEGIN{print
 DOWNLOAD_MBPS="$(awk -v b="$DOWNLOAD_BYTES_DONE" -v s="$DOWNLOAD_SECONDS" 'BEGIN{if(s>0) printf "%.2f", (b*8/1000000)/s; else print "0.00"}')"
 
 ###############################################################################
-# Upload - same POST architecture as fulltest.sh, but smaller payload.
-# Do not pipe generated data through curl; this lets us know exactly how many
-# bytes were intended for the transfer and avoids a producer-side SIGPIPE.
+# Upload
 ###############################################################################
 head -c "$UPLOAD_BYTES" /dev/zero > "$UPLOAD_FILE"
 UPLOAD_START="$(date +%s%N)"
@@ -290,8 +275,8 @@ UPLOAD_OK=false
 [[ "$DOWNLOAD_RC" -eq 0 && "$DOWNLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$DOWNLOAD_BYTES_DONE" -gt 0 ]] && DOWNLOAD_OK=true
 [[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ ]] && UPLOAD_OK=true
 
-# curl may hit a read timeout after the complete request body was already sent
-# while the remote endpoint is still processing/returning its response.
+# A timeout is acceptable for upload only when the server already returned a
+# successful HTTP status, because the request body may already be complete.
 if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ ]]; then
     UPLOAD_OK=true
 fi
@@ -304,4 +289,7 @@ fi
 warning "Speed test completed with warnings"
 (( DOWNLOAD_RC != 0 )) && [[ -s "$RUN_DIR/download.err" ]] && { printf 'Download error: '; tail -n 2 "$RUN_DIR/download.err"; }
 (( UPLOAD_RC != 0 )) && [[ -s "$RUN_DIR/upload.err" ]] && { printf 'Upload note: '; tail -n 2 "$RUN_DIR/upload.err"; }
-exit 0
+
+# IMPORTANT: do not return success for an incomplete test. score.sh uses this
+# exit code together with measured bytes to classify the candidate.
+exit 1
