@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ============================================================================
 # Smart Proxy Server - speedtest
 #
 # Fast download/upload throughput test for ONE sing-box config.
-# ============================================================================
 
 SING_BOX="${SING_BOX_BIN:-sing-box}"
 PORT="${SPEEDTEST_PORT:-1235}"
@@ -52,6 +50,9 @@ ERR_FILE="$RUN_DIR/sing-box.err"
 LOG_FILE="$RUN_DIR/sing-box.log"
 META_FILE="$RUN_DIR/meta.txt"
 UPLOAD_FILE="$RUN_DIR/upload.bin"
+DOWNLOAD_FILE="$RUN_DIR/download.out"
+DOWNLOAD_ERR="$RUN_DIR/download.err"
+UPLOAD_ERR="$RUN_DIR/upload.err"
 PID=""
 
 cleanup(){
@@ -214,12 +215,9 @@ fi
 ###############################################################################
 # Download
 ###############################################################################
-DOWNLOAD_START="$(date +%s%N)"
-DOWNLOAD_FILE="$RUN_DIR/download.out"
-DOWNLOAD_ERR="$RUN_DIR/download.err"
 : > "$DOWNLOAD_FILE"
 : > "$DOWNLOAD_ERR"
-
+DOWNLOAD_START="$(date +%s%N)"
 set +e
 DOWNLOAD_HTTP="$(curl -4 -L --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
     --socks5-hostname "127.0.0.1:$PORT" \
@@ -227,7 +225,6 @@ DOWNLOAD_HTTP="$(curl -4 -L --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 
     "$DOWNLOAD_URL" 2>"$DOWNLOAD_ERR")"
 DOWNLOAD_RC=$?
 set -e
-
 DOWNLOAD_END="$(date +%s%N)"
 DOWNLOAD_BYTES_DONE="$(wc -c < "$DOWNLOAD_FILE" 2>/dev/null || printf '0')"
 DOWNLOAD_SECONDS="$(awk -v a="$DOWNLOAD_START" -v b="$DOWNLOAD_END" 'BEGIN{printf "%.3f", (b-a)/1000000000}')"
@@ -237,13 +234,14 @@ DOWNLOAD_MBPS="$(awk -v b="$DOWNLOAD_BYTES_DONE" -v s="$DOWNLOAD_SECONDS" 'BEGIN
 # Upload
 ###############################################################################
 head -c "$UPLOAD_BYTES" /dev/zero > "$UPLOAD_FILE"
+: > "$UPLOAD_ERR"
 UPLOAD_START="$(date +%s%N)"
 set +e
 UPLOAD_HTTP="$(curl -4 --http1.1 --max-time "$TIMEOUT" --connect-timeout 5 \
     --socks5-hostname "127.0.0.1:$PORT" \
     -sS -o /dev/null -w '%{http_code}' \
     -X POST --data-binary "@$UPLOAD_FILE" \
-    "$UPLOAD_URL" 2>"$RUN_DIR/upload.err")"
+    "$UPLOAD_URL" 2>"$UPLOAD_ERR")"
 UPLOAD_RC=$?
 set -e
 UPLOAD_END="$(date +%s%N)"
@@ -277,8 +275,9 @@ UPLOAD_OK=false
 [[ "$DOWNLOAD_RC" -eq 0 && "$DOWNLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$DOWNLOAD_BYTES_DONE" -gt 0 ]] && DOWNLOAD_OK=true
 [[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]] && UPLOAD_OK=true
 
-# curl may hit a read timeout after the complete request body was already sent
-# while the remote endpoint is still processing/returning its response.
+# Upload may time out after the complete request body was sent and the remote
+# endpoint has not finished responding. Count this as valid upload throughput
+# only when the request had a successful 2xx/3xx response and bytes were sent.
 if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -gt 0 ]]; then
     UPLOAD_OK=true
 fi
@@ -290,5 +289,5 @@ fi
 
 warning "Speed test completed with warnings"
 (( DOWNLOAD_RC != 0 )) && [[ -s "$DOWNLOAD_ERR" ]] && { printf 'Download error: '; tail -n 2 "$DOWNLOAD_ERR"; }
-(( UPLOAD_RC != 0 )) && [[ -s "$RUN_DIR/upload.err" ]] && { printf 'Upload note: '; tail -n 2 "$RUN_DIR/upload.err"; }
+(( UPLOAD_RC != 0 )) && [[ -s "$UPLOAD_ERR" ]] && { printf 'Upload note: '; tail -n 2 "$UPLOAD_ERR"; }
 exit 1
