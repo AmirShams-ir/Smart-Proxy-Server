@@ -125,8 +125,8 @@ profile_name(){ basename "$1" .json; }
 ###############################################################################
 # Cheap gate from validator.csv, then expensive transfer test.
 ###############################################################################
-printf '%-58s %8s %10s %10s %8s\n' 'Profile' 'RTT(ms)' 'Download' 'Upload' 'Score'
-printf '%s\n' '----------------------------------------------------------------------------------------------------------'
+printf '%-58s %8s %10s %10s %8s %10s\n' 'Profile' 'RTT(ms)' 'Download' 'Upload' 'Score' 'Status'
+printf '%s\n' '--------------------------------------------------------------------------------------------------------------------'
 
 index=0
 for input in "${CONFIGS[@]}"; do
@@ -137,32 +137,44 @@ for input in "${CONFIGS[@]}"; do
     rtt="$(awk -F '\t' -v p="$name" '$1==p {print $2; exit}' "$TMP_DIR/validator.tsv" 2>/dev/null || true)"
 
     if [[ ! "$rtt" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v x="$rtt" 'BEGIN{exit !(x>0)}'; then
-        printf '%s\t%s\t-\t0\t0\n' "$input" "$name" >> "$RESULTS"
-        printf '%-58s %8s %10s %10s %8s\n' "$name" '-' '-' '-' 'SKIP'
+        printf '%s\t%s\t%s\t0\t0\tINVALID_RTT\n' "$input" "$name" "-" >> "$RESULTS"
+        printf '%-58s %8s %10s %10s %8s %10s\n' "$name" '-' '-' '-' '0.00' 'SKIP'
         printf '[*] [%s/%s] No valid RTT from validator; skipping Download/Upload for %s\n' "$index" "$CONFIG_COUNT" "$name" >&2
         continue
     fi
 
     out="$TMP_DIR/speed-$index.out"
+    err="$TMP_DIR/speed-$index.err"
     set +e
     SCORE_DOWNLOAD_BYTES="$DOWNLOAD_BYTES" \
     SCORE_UPLOAD_BYTES="$UPLOAD_BYTES" \
     SPEEDTEST_TIMEOUT="$SPEEDTEST_TIMEOUT" \
-    bash "$SPEEDTEST" "$input" >"$out" 2>"$TMP_DIR/speed-$index.err"
+    bash "$SPEEDTEST" "$input" >"$out" 2>"$err"
     speed_rc=$?
     set -e
 
     download="$(awk '/^Download[[:space:]]+[0-9.]+ Mbps/{print $2; exit}' "$out" 2>/dev/null || true)"
     upload="$(awk '/^Upload[[:space:]]+[0-9.]+ Mbps/{print $2; exit}' "$out" 2>/dev/null || true)"
+    download_http="$(awk '$1=="Download" && $2=="HTTP" {print $3; exit}' "$out" 2>/dev/null || true)"
+    upload_http="$(awk '$1=="Upload" && $2=="HTTP" {print $3; exit}' "$out" 2>/dev/null || true)"
     [[ "$download" =~ ^[0-9]+([.][0-9]+)?$ ]] || download=0
     [[ "$upload" =~ ^[0-9]+([.][0-9]+)?$ ]] || upload=0
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$input" "$name" "$rtt" "$download" "$upload" >> "$RESULTS"
-    printf '%-58s %8s %10s %10s %8s\n' "$name" "$rtt" "$download" "$upload" '-'
-
-    if (( speed_rc != 0 )); then
-        warning "$name speedtest returned rc=$speed_rc; measured values retained" >&2
+    status='OK'
+    if [[ "$download" == "0" || "$upload" == "0" ]]; then
+        status='INVALID_SPEED'
+    elif (( speed_rc != 0 )); then
+        status='SPEEDTEST_RC'
     fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$input" "$name" "$rtt" "$download" "$upload" >> "$RESULTS"
+    printf '%-58s %8s %10s %10s %8s %10s\n' "$name" "$rtt" "$download" "$upload" '-' "$status"
+
+    if [[ "$status" != 'OK' && -s "$err" ]]; then
+        warning "$name: $status" >&2
+        tail -n 3 "$err" >&2 || true
+    fi
+
 done
 
 ###############################################################################
@@ -231,8 +243,9 @@ rows.sort(key=lambda r: (
 csv_file.parent.mkdir(parents=True, exist_ok=True)
 with csv_file.open('w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
-    writer.writerow(['Rank','Profile','RTT_ms','Download_Mbps','Upload_Mbps','Score'])
+    writer.writerow(['Rank','Profile','RTT_ms','Download_Mbps','Upload_Mbps','Score','Eligible'])
     for rank, r in enumerate(rows, 1):
+        eligible = 'yes' if r['score'] > 0 else 'no'
         writer.writerow([
             rank,
             r['name'],
@@ -240,6 +253,7 @@ with csv_file.open('w', newline='', encoding='utf-8') as f:
             f"{r['download']:.2f}",
             f"{r['upload']:.2f}",
             f"{r['score']:.2f}",
+            eligible,
         ])
 
 for old in winner_dir.glob('*.json'):
@@ -257,6 +271,8 @@ for rank, r in enumerate(rows, 1):
         f"{rank:>4} {r['name']:<58} {rtt:>8} "
         f"{r['download']:>10.2f} {r['upload']:>10.2f} {r['score']:>8.2f}"
     )
+
+print(f"Eligible profiles: {len(selected)}/{len(rows)}")
 PY
 
 success "Score complete"
