@@ -11,7 +11,7 @@ set -Eeuo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="$BASE_DIR/templates"
 CACHE_DIR="$BASE_DIR/cache"
-EDGE_FILE="$CACHE_DIR/edges.csv"
+EDGE_FILE="$CACHE_DIR/edge.csv"
 OUTPUT_DIR="$CACHE_DIR/generated"
 
 fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
