@@ -40,8 +40,7 @@ require_cmd "$SING_BOX"
 [[ -f "$SPEEDTEST" ]] || fatal "speedtest.sh not found: $SPEEDTEST"
 [[ -d "$VALIDATED_DIR" ]] || fatal "Validated directory not found: $VALIDATED_DIR"
 
-# IMPORTANT: do not depend on executable permission from Git.
-# Invoke speedtest.sh explicitly through bash so `bash score.sh` works after git pull.
+# Do not depend on Git executable bits.
 SPEEDTEST_CMD=(bash "$SPEEDTEST")
 
 mkdir -p "$WINNER_DIR" "$(dirname "$CSV_FILE")"
@@ -66,27 +65,12 @@ printf '  Speedtest : bash %s\n' "$SPEEDTEST"
 printf '  Weights   : Down=%s%% Up=%s%% RTT=%s%%\n\n' "$DOWNLOAD_WEIGHT" "$UPLOAD_WEIGHT" "$RTT_WEIGHT"
 
 profile_name(){
-    python3 - "$1" <<'PY'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])
-data=json.loads(p.read_text(encoding='utf-8'))
-name=None
-if isinstance(data,dict):
-    route=data.get('route') or {}
-    if isinstance(route,dict):
-        final=route.get('final')
-        if isinstance(final,str) and final: name=final
-    if not name and isinstance(data.get('outbounds'),list):
-        for item in data['outbounds']:
-            if isinstance(item,dict) and item.get('tag'):
-                name=str(item['tag']); break
-    if not name and data.get('tag'): name=str(data['tag'])
-print(name or p.stem)
-PY
+    # Keep the complete filename because maker.sh encodes protocol/edge/port/
+    # transport/security in it. This prevents all BPB_trojan profiles collapsing
+    # into the same display name.
+    basename "$1" .json
 }
 
-# Measure one-shot RTT through the candidate using the same isolated SOCKS model.
 measure_rtt(){
     local input="$1" port="$2" run_dir="$TMP_DIR/rtt-$port"
     local cfg="$run_dir/config.json" pid="" ready=0 http rc t0 t1
@@ -124,17 +108,17 @@ else:
     out.write_text(json.dumps(cfg,indent=2,ensure_ascii=False),encoding='utf-8')
 PY
     then
-        echo 0; return
+        echo "-"; return
     fi
 
-    if ! "$SING_BOX" check -c "$cfg" >/dev/null 2>&1; then echo 0; return; fi
+    if ! "$SING_BOX" check -c "$cfg" >/dev/null 2>&1; then echo "-"; return; fi
     "$SING_BOX" run -c "$cfg" >"$run_dir/sing-box.log" 2>"$run_dir/sing-box.err" & pid=$!
     for _ in {1..30}; do
         if ss -lnt 2>/dev/null | grep -Eq '[:.]'"$port"'[[:space:]]'; then ready=1; break; fi
         if ! kill -0 "$pid" 2>/dev/null; then break; fi
         sleep 0.05
     done
-    if (( ready == 0 )); then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; echo 0; return; fi
+    if (( ready == 0 )); then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; echo "-"; return; fi
 
     t0="$(date +%s%N)"
     set +e
@@ -147,17 +131,17 @@ PY
     if (( rc == 0 )) && [[ "$http" =~ ^2[0-9][0-9]$ ]]; then
         awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f",(b-a)/1000000}'
     else
-        echo 0
+        echo "-"
     fi
 }
 
-printf '%-46s %8s %10s %10s %8s\n' 'Profile' 'RTT(ms)' 'Download' 'Upload' 'Score'
-printf '%s\n' '------------------------------------------------------------------------------------------'
+printf '%-58s %8s %10s %10s %8s\n' 'Profile' 'RTT(ms)' 'Download' 'Upload' 'Score'
+printf '%s\n' '----------------------------------------------------------------------------------------------------------'
 
 index=0
 for input in "${CONFIGS[@]}"; do
     index=$((index+1))
-    name="$(profile_name "$input" 2>/dev/null || basename "$input" .json)"
+    name="$(profile_name "$input")"
     info "[$index/$CONFIG_COUNT] Testing $name" >&2
 
     out="$TMP_DIR/speed-$index.out"
@@ -177,7 +161,7 @@ for input in "${CONFIGS[@]}"; do
     port=$((15000 + index))
     rtt="$(measure_rtt "$input" "$port")"
     printf '%s\t%s\t%s\t%s\t%s\n' "$input" "$name" "$rtt" "$download" "$upload" >> "$RESULTS"
-    printf '%-46s %8s %10s %10s %8s\n' "$name" "$rtt" "$download" "$upload" '-'
+    printf '%-58s %8s %10s %10s %8s\n' "$name" "$rtt" "$download" "$upload" '-'
     (( speed_rc != 0 )) && warning "$name speedtest returned rc=$speed_rc; measured values retained" >&2 || true
 done
 
@@ -190,29 +174,45 @@ rows=[]
 for line in results.read_text(encoding='utf-8').splitlines():
     if line.strip():
         path,name,rtt,down,up=line.split('\t')
-        rows.append({'path':path,'name':name,'rtt':float(rtt),'download':float(down),'upload':float(up)})
-max_down=max((r['download'] for r in rows),default=0.0)
-max_up=max((r['upload'] for r in rows),default=0.0)
-valid_rtt=[r['rtt'] for r in rows if r['rtt']>0]
-min_rtt=min(valid_rtt,default=0.0)
+        rtt_val=None if rtt == '-' else float(rtt)
+        rows.append({'path':path,'name':name,'rtt':rtt_val,'download':float(down),'upload':float(up)})
+
+# Only candidates with valid RTT are rankable. A failed RTT must not become RTT=0,
+# because 0 ms would otherwise be interpreted as the best possible latency.
+rankable=[r for r in rows if r['rtt'] is not None and r['rtt']>0]
+max_down=max((r['download'] for r in rankable),default=0.0)
+max_up=max((r['upload'] for r in rankable),default=0.0)
+min_rtt=min((r['rtt'] for r in rankable),default=0.0)
+
 for r in rows:
-    ds=(r['download']/max_down*100) if max_down else 0
-    us=(r['upload']/max_up*100) if max_up else 0
-    rs=(min_rtt/r['rtt']*100) if min_rtt and r['rtt'] else 0
+    if r not in rankable:
+        r['score']=0.0
+        continue
+    ds=(r['download']/max_down*100) if max_down else 0.0
+    us=(r['upload']/max_up*100) if max_up else 0.0
+    rs=(min_rtt/r['rtt']*100) if min_rtt and r['rtt'] else 0.0
     r['score']=round((ds*wd+us*wu+rs*wr)/100,2)
-rows.sort(key=lambda r:(-r['score'],-r['download'],-r['upload'],r['rtt'] if r['rtt'] else math.inf,r['name']))
+
+rows.sort(key=lambda r:(-r['score'],-r['download'],-r['upload'],r['rtt'] if r['rtt'] is not None else math.inf,r['name']))
+
 with csv_file.open('w',newline='',encoding='utf-8') as f:
     w=csv.writer(f); w.writerow(['Rank','Profile','RTT_ms','Download_Mbps','Upload_Mbps','Score'])
     for i,r in enumerate(rows,1):
-        w.writerow([i,r['name'],f"{r['rtt']:.2f}" if r['rtt'] else '-',f"{r['download']:.2f}",f"{r['upload']:.2f}",f"{r['score']:.2f}"])
+        w.writerow([i,r['name'],f"{r['rtt']:.2f}" if r['rtt'] is not None else '-',f"{r['download']:.2f}",f"{r['upload']:.2f}",f"{r['score']:.2f}"])
+
 for old in winner_dir.glob('*.json'): old.unlink(missing_ok=True)
-selected=rows[:min(top_n,len(rows))]
-for r in selected: shutil.copy2(r['path'],winner_dir/Path(r['path']).name)
-print(f"{'Rank':>4} {'Profile':<46} {'RTT(ms)':>8} {'Download':>10} {'Upload':>10} {'Score':>8}")
-print('-'*86)
-for i,r in enumerate(rows,1): print(f"{i:>4} {r['name']:<46} {r['rtt']:>8.2f} {r['download']:>10.2f} {r['upload']:>10.2f} {r['score']:>8.2f}")
+selected=[r for r in rows if r['score']>0][:min(top_n,len(rows))]
+for r in selected:
+    shutil.copy2(r['path'],winner_dir/Path(r['path']).name)
+
+print(f"{'Rank':>4} {'Profile':<58} {'RTT(ms)':>8} {'Download':>10} {'Upload':>10} {'Score':>8}")
+print('-'*106)
+for i,r in enumerate(rows,1):
+    rtt='-' if r['rtt'] is None else f"{r['rtt']:.2f}"
+    print(f"{i:>4} {r['name']:<58} {rtt:>8} {r['download']:>10.2f} {r['upload']:>10.2f} {r['score']:>8.2f}")
 PY
 
 success "Score complete"
 printf 'CSV     : %s\n' "$CSV_FILE"
 printf 'Winners : %s\n' "$WINNER_DIR"
+printf 'Top     : %s\n' "$TOP_N"
