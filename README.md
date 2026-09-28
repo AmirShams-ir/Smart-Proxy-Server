@@ -1,476 +1,263 @@
-<div align="center">
+# Smart Proxy Server
 
-# 🚀 Smart Proxy Server
+Lightweight Cloudflare edge discovery, sing-box candidate generation, protocol-aware validation, throughput scoring, and automatic SOCKS5 forwarding.
 
-### ⚡ A Lightweight, Fast and Intelligent Proxy Server
-### powered by **sing-box + Health + Score + Smart Race Engine**
-
-![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu%20%7C%20Armbian-blue?logo=linux)
-![Bash](https://img.shields.io/badge/Bash-100%25-green?logo=gnubash)
-![sing-box](https://img.shields.io/badge/sing--box-powered-orange)
-![Proxy](https://img.shields.io/badge/Proxy-SOCKS5-purple)
-![License](https://img.shields.io/badge/License-Apache-red)
-![Version](https://img.shields.io/badge/version-2.0.3-blueviolet)
-
-Fast • Adaptive • Lightweight • Privacy First
-
-</div>
-
----
-
-# ⭐ Highlights
-
-- ⚡ Intelligent Proxy Race Engine
-- 🩺 Lightweight Health Engine
-- 📊 Weighted 0–100 Score Engine
-- 🏆 Automatic Best Profile Selection
-- 🔄 Hysteresis + Cooldown Protection
-- 🌐 SOCKS5 Proxy on the LAN
-- 🔐 VLESS and Trojan Profile Support
-- 🧩 TLS / SNI / ALPN / uTLS Fingerprint Support
-- 🌐 WebSocket and gRPC Transport Support
-- 📈 Human-readable Race Reports
-- 📝 Full `journalctl` Reporting
-- 💾 JSON State — No Database
-- 🪶 Extremely Lightweight
-- 🚀 Optimized for Orange Pi & Raspberry Pi
-- ❤️ Privacy First
-- 🔧 Designed for Debian-based systems
-
----
-
-# ✨ Features
-
-- ⚡ Health testing of every configured proxy profile
-- 🏎 RTT measurement
-- 📶 Jitter measurement
-- ❌ Packet-loss measurement
-- ✅ Success-rate calculation
-- 📈 Weighted proxy scoring
-- 🏆 Deterministic ranking and winner selection
-- 🔄 Automatic profile switching
-- 🛡 Hysteresis to prevent unnecessary switching
-- ⏳ Cooldown protection between switches
-- 🧠 Automatic and manual selection modes
-- 🧾 Persistent active-profile state
-- 🔌 Automatic sing-box configuration generation
-- 🔁 Automatic sing-box reload/restart when the active profile changes
-- 📡 SOCKS5 listener for local clients
-- 🔒 TLS with SNI, ALPN and fingerprint parameters
-- 🌐 WebSocket transport
-- 🛰 gRPC transport
-- 📊 Terminal race report
-- 📝 systemd journal race report
-- 🗂 File-based profiles
-- 🪶 Low CPU and RAM footprint
-- ❤️ No telemetry or tracking
-
----
-
-# 🧠 Architecture
-
-Smart Proxy Server follows the same philosophy as Smart DNS Server: measure first, score objectively, race candidates, then apply one deterministic decision.
+## Pipeline
 
 ```text
-                              Smart Proxy Server
-                                      │
-                                      ▼
-                              ┌───────────────┐
-                              │  reload.sh    │
-                              │ Report Engine  │
-                              └───────┬───────┘
-                                      │
-                    ┌─────────────────┼─────────────────┐
-                    ▼                 ▼                 ▼
-             ┌────────────┐   ┌────────────┐   ┌────────────┐
-             │ Health     │   │ Score      │   │ Profiles   │
-             │ Engine     │   │ Engine     │   │ *.txt      │
-             └─────┬──────┘   └─────┬──────┘   └────────────┘
-                   │                │
-                   └───────┬────────┘
-                           ▼
-                    ┌──────────────┐
-                    │ Smart Race   │
-                    │ Engine       │
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Hysteresis     State      Generator
-              │            │            │
-              └────────────┼────────────┘
-                           ▼
-                    ┌──────────────┐
-                    │   sing-box   │
-                    │ Active Proxy │
-                    └──────────────┘
+scanner.sh
+   │
+   ▼
+cache/edge.csv
+   │
+   ▼
+maker.sh
+   │
+   ▼
+cache/generated/*.json
+   │
+   ▼
+validator.sh ──► singtest.sh
+   │
+   ▼
+cache/valid.csv
+cache/validated/*.json
+   │
+   ▼
+score.sh ──► speedtest.sh
+   │
+   ▼
+cache/winner.csv
+cache/winner/*.json
+   │
+   ▼
+forwarder.sh
+   │
+   ▼
+SOCKS5 :1080-1083
 ```
 
-### Design principle
+`reload.sh` runs the five stages in order and keeps the currently running forwarder untouched until a complete new winner set has been produced.
 
-`reload.sh` performs one health/score pass and stores the result set. `race.sh` consumes that same result set for the actual decision, so the displayed **Winner** and the selected **Active Profile** are based on the same measurements.
+## Repository layout
 
----
+```text
+Smart-Proxy-Server/
+├── config/
+│   ├── cf-asn13335.txt
+│   ├── cf-ipv4.txt
+│   ├── cf-ipv6.txt
+│   └── defaults.conf
+├── docs/
+│   └── SMART-EDGE-RACE.md
+├── lib/
+│   ├── common.sh
+│   └── timer.sh
+├── systemd/
+│   ├── sing-box.service
+│   ├── reload.service
+│   └── reload.timer
+├── templates/
+│   ├── worker.temp
+│   └── worker1.conf
+├── scanner.sh
+├── maker.sh
+├── singtest.sh
+├── validator.sh
+├── speedtest.sh
+├── score.sh
+├── forwarder.sh
+├── reload.sh
+├── install.sh
+└── uninstall.sh
+```
 
-# 📊 Race Report
+Runtime artefacts are generated under `cache/` and are intentionally not part of the source tree.
 
-Run a complete race manually:
+## Requirements
+
+Debian/Ubuntu/Armbian with:
+
+- Bash
+- curl
+- Python 3
+- jq
+- iputils-ping
+- coreutils
+- systemd
+- sing-box
+
+The installer installs the missing base packages and installs the latest sing-box release when sing-box is not already present.
+
+## Configure
+
+Edit `config/defaults.conf` for pipeline limits, scoring weights, and the automatic rebuild interval.
+
+Example:
+
+```ini
+RELOAD_INTERVAL=24h
+
+SCANNER_PARALLEL=${SCANNER_PARALLEL:-8}
+SCANNER_TOP=${SCANNER_TOP:-10}
+
+VALIDATOR_PARALLEL=${VALIDATOR_PARALLEL:-4}
+VALIDATOR_TOP=${VALIDATOR_TOP:-10}
+
+SCORE_DOWNLOAD_WEIGHT=${SCORE_DOWNLOAD_WEIGHT:-55}
+SCORE_UPLOAD_WEIGHT=${SCORE_UPLOAD_WEIGHT:-30}
+SCORE_RTT_WEIGHT=${SCORE_RTT_WEIGHT:-15}
+```
+
+The timer reads `RELOAD_INTERVAL` from this file through `lib/timer.sh`. There is one source of truth for the rebuild interval.
+
+## Worker templates
+
+`maker.sh` reads every `*.conf` file in `templates/` that contains a `[worker]` section.
+
+Copy `templates/worker.temp` to a new worker file and set the Worker host, credentials, transports, and security modes.
+
+Keep private credentials out of public repositories. The included `templates/worker1.conf` is the active example configuration used by the project.
+
+## Run the pipeline
+
+Run one complete rebuild:
 
 ```bash
 sudo bash reload.sh
 ```
 
-Example output:
-
-```text
-[*] Testing proxy profiles...
-
-Profile                  Host                                RTT    Jitter    Loss   Success   Score
-----------------------------------------------------------------------------------------------------------------
-Config X
-Config Y
-Config Z
-----------------------------------------------------------------------------------------------------------------
-
-[*] Ranking proxy profiles...
-
-Profile                  Host                                RTT    Jitter    Loss   Success   Score
-----------------------------------------------------------------------------------------------------------------
-Config X
-Config Z
-Config Y
-----------------------------------------------------------------------------------------------------------------
-
-Winner
-----------------------------------------------------------------------------------------------------------------
-Profile : Config X
-Score   : 86/100
-RTT     : 30.006ms
-Jitter  : 0ms
-Loss    : 0%
-Success : 100%
-----------------------------------------------------------------------------------------------------------------
-
-[*] Applying race decision...
-[ACTIVE] Config X  score=86
-
-Active Profile
-Profile : Config X
-Score   : 86/100
-```
-
-The testing table and ranking table use the same result set, and the final active profile is selected through the Race Engine.
-
----
-
-# 🩺 Health Engine
-
-Each profile is tested independently.
-
-The Health Engine measures:
-
-| Metric | Meaning |
-|---|---|
-| RTT | Endpoint round-trip/connectivity latency |
-| Jitter | Difference between observed latency samples |
-| Loss | Packet loss percentage |
-| Success | `100 - Loss` |
-
-The engine uses ICMP when available and falls back to TCP connection timing when ICMP is unavailable.
-
-> Endpoint health is intentionally lightweight. It is an indication of endpoint reachability and latency, not a full end-to-end application-layer proxy benchmark.
-
----
-
-# 📈 Score Engine
-
-The Score Engine converts Health metrics into a weighted score from `0` to `100`.
-
-Current weights:
-
-```text
-RTT      = 35%
-Jitter   = 25%
-Loss     = 25%
-Success  = 15%
-```
-
-Configured in:
-
-```text
-config/defaults.conf
-```
-
-Current scoring uses smooth RTT and jitter curves so a 30 ms endpoint can rank meaningfully above a 100 ms endpoint instead of all healthy endpoints collapsing to the same rounded score.
-
----
-
-# 🏆 Smart Race Engine
-
-The Race Engine compares all usable profiles and applies deterministic tie-breaking.
-
-Selection order:
-
-```text
-1. Higher Score
-2. Higher Success Rate
-3. Lower RTT
-4. Lower Jitter
-5. Lexicographically smaller profile name
-```
-
-This means a race can consistently choose the same winner when several profiles have identical scores.
-
----
-
-# 🛡 Hysteresis & Cooldown
-
-Automatic mode does not switch profiles every time a small measurement fluctuation occurs.
-
-A candidate must exceed the active profile by at least:
-
-```ini
-HYSTERESIS=8
-```
-
-and the configured cooldown must have elapsed:
-
-```ini
-COOLDOWN=120
-```
-
-This reduces profile flapping and unnecessary sing-box reloads.
-
----
-
-# ⚙️ Configuration
-
-Main configuration:
-
-```text
-config/defaults.conf
-```
-
-Current defaults:
-
-```ini
-MODE=auto
-ACTIVE_PROFILE=
-HEALTH_INTERVAL=1h
-PING_COUNT=3
-TIMEOUT=2
-MOVING_AVERAGE=5
-HYSTERESIS=8
-COOLDOWN=120
-FAIL_THRESHOLD=3
-RECOVERY_THRESHOLD=2
-RTT_WEIGHT=35
-JITTER_WEIGHT=25
-LOSS_WEIGHT=25
-SUCCESS_WEIGHT=15
-TEST_URL=https://cp.cloudflare.com/generate_204
-SOCKS_LISTEN=0.0.0.0
-SOCKS_PORT=1080
-CONFIG_FILE=/etc/sing-box/config.json
-STATE_FILE=/etc/sing-box/proxy-state.json
-PROFILE_DIR=/etc/sing-box/profiles
-LOG_DIR=/var/log/smartproxy
-LOG_FILE=/var/log/smartproxy/proxy.log
-```
-
----
-
-# 🔀 Selection Modes
-
-### Automatic mode
-
-```ini
-MODE=auto
-```
-
-The Race Engine selects and maintains the best profile using score, hysteresis and cooldown.
-
-### Manual mode
-
-```ini
-MODE=manual
-ACTIVE_PROFILE=vless1
-```
-
-Manual mode prevents automatic profile competition and keeps the configured selection policy.
-
----
-
-# 📂 Profiles
-
-Each profile is stored as one text file containing one URI.
-
-Example:
-
-```text
-profiles/01_Nova_443.txt
-profiles/02_Zeus_443.txt
-profiles/19_Nahan_8443.txt
-```
-
-Supported schemes:
-
-```text
-vless://
-trojan://
-```
-
-The generator supports common URI parameters including:
-
-- TLS
-- SNI
-- ALPN
-- uTLS fingerprint
-- WebSocket
-- gRPC
-
-Example:
-
-```text
-vless://UUID@host:443?encryption=none&security=tls&sni=host&type=ws&host=host&path=%2F#Nova
-```
-
-For production use, keep private credentials out of public repositories whenever possible.
-
----
-
-# 🔌 SOCKS5 Proxy
-
-The generated sing-box configuration exposes a SOCKS5 listener.
-
-Default:
-
-```ini
-SOCKS_LISTEN=0.0.0.0
-SOCKS_PORT=1080
-```
-
-Clients on the LAN can therefore use:
-
-```text
-SOCKS5 → <Orange Pi IP>:1080
-```
-
-Applications do not need to know which VLESS or Trojan profile is currently active; sing-box and the Race Engine handle the active outbound profile.
-
----
-
-# 🧩 sing-box
-
-sing-box is the execution layer.
-
-The Race Engine generates:
-
-```text
-/etc/sing-box/config.json
-```
-
-The generator creates the active outbound and reloads or restarts sing-box after a profile switch.
-
-Validate the generated configuration with:
+Run individual stages when debugging:
 
 ```bash
-sing-box check -c /etc/sing-box/config.json
+bash scanner.sh
+bash maker.sh
+bash validator.sh
+bash score.sh
+sudo bash forwarder.sh
 ```
 
-The systemd service is:
+Test one generated configuration:
+
+```bash
+bash singtest.sh cache/generated/<profile>.json
+```
+
+Test one validated configuration with throughput measurement:
+
+```bash
+bash speedtest.sh cache/validated/<profile>.json
+```
+
+## Scanning
+
+`scanner.sh` reads the Cloudflare IPv4/IPv6 CIDR lists, creates a bounded deterministic target set, probes candidates with ICMP, optionally resolves the Cloudflare colo, and writes only the selected IP addresses to:
 
 ```text
-sing-box.service
+cache/edge.csv
 ```
 
----
+The console output still includes RTT, jitter, loss, colo, and score for diagnostics.
 
-# 🔄 Automatic Reload
+## Candidate generation
 
-The automatic race is driven by systemd.
+`maker.sh` combines:
 
-The source value is `HEALTH_INTERVAL` in `config/defaults.conf`.
+- Cloudflare edge IPs from `cache/edge.csv`
+- Worker definitions from `templates/*.conf`
+- VLESS and Trojan protocol settings
 
-Example:
+It writes complete sing-box JSON candidates to `cache/generated/`.
 
-```ini
-HEALTH_INTERVAL=1h
+Unsupported transport/security combinations are skipped instead of generating invalid candidates.
+
+## Validation
+
+`validator.sh` is deliberately cheap. It calls `singtest.sh` and keeps only the fastest `VALIDATOR_TOP` successful candidates.
+
+Outputs:
+
+```text
+cache/valid.csv
+cache/validated/
 ```
 
-`lib/timer.sh` synchronizes this value into the installed systemd timer as `OnUnitActiveSec`. This keeps the configuration and timer aligned without maintaining a second interval value.
+`singtest.sh` performs the protocol-aware sing-box connectivity test and measures the response time to Cloudflare's lightweight endpoint. It does not perform throughput testing.
 
-Initial boot execution is configured with a short boot delay, followed by the recurring health/race interval.
+## Scoring
 
-Check the timer:
+`score.sh` measures only the validated candidates with `speedtest.sh` and combines:
+
+```text
+Download = 55%
+Upload   = 30%
+RTT      = 15%
+```
+
+The default winner set is the top four profiles.
+
+Outputs:
+
+```text
+cache/winner.csv
+cache/winner/
+```
+
+Throughput tests use small transfer sizes to keep the pipeline practical on low-power devices.
+
+## Forwarder
+
+`forwarder.sh` starts one independent sing-box instance per winner.
+
+Defaults:
+
+```text
+0.0.0.0:1080  winner #1
+0.0.0.0:1081  winner #2
+0.0.0.0:1082  winner #3
+0.0.0.0:1083  winner #4
+```
+
+Change the bind address, base port, or instance limit with environment variables:
+
+```bash
+FORWARDER_BIND=0.0.0.0
+FORWARDER_BASE_PORT=1080
+FORWARDER_MAX=4
+```
+
+Runtime configurations, PID files, and logs stay outside the repository.
+
+## Automatic rebuilds
+
+Systemd runs:
+
+```text
+reload.timer
+   └── reload.service
+          └── reload.sh
+               └── scanner → maker → validator → score → forwarder
+```
+
+Change `RELOAD_INTERVAL` in `config/defaults.conf`, then synchronize the installed timer:
+
+```bash
+sudo bash lib/timer.sh
+```
+
+Check it with:
 
 ```bash
 systemctl status reload.timer
 systemctl list-timers --all | grep reload
 ```
 
-Re-sync the timer after changing `HEALTH_INTERVAL`:
+Run a rebuild immediately:
 
-```bash
-sudo bash lib/timer.sh
+```sudo systemctl start reload.service
 ```
 
-Run one race immediately:
-
-```bash
-systemctl start reload.service
-```
-
----
-
-# 📝 Journal Reporting
-
-The reload service writes the complete race report to systemd journal.
-
-View it with:
-
-```bash
-journalctl -u reload.service -n 200 --no-pager
-```
-
-A dedicated tag is also available:
-
-```bash
-journalctl -t smart-proxy-reload -n 200 --no-pager
-```
-
-The journal report contains:
-
-```text
-Health table
-Ranking table
-Winner
-Race decision
-Active Profile
-Completion summary
-```
-
-This keeps Smart Proxy Server operationally consistent with Smart DNS Server's journal reporting style.
-
----
-
-# 📝 Logs
-
-Runtime logs are stored under:
-
-```text
-/var/log/smartproxy/
-```
-
-The primary proxy log is:
-
-```text
-/var/log/smartproxy/proxy.log
-```
-
----
-
-# 🚀 Installation
+## Installation
 
 ```bash
 git clone https://github.com/AmirShams-ir/Smart-Proxy-Server.git
@@ -478,279 +265,27 @@ cd Smart-Proxy-Server
 sudo bash install.sh
 ```
 
-The repository checkout is the project source and runtime working tree. Installation does **not** create a duplicate `/opt/smart-proxy` project tree.
-
-Runtime configuration, state, profiles, logs and systemd units are kept in their dedicated system locations:
+The repository itself remains the working tree. Installed system files live under:
 
 ```text
 /etc/sing-box/
-/var/log/smartproxy/
 /etc/systemd/system/
-/run/smartproxy/
+/var/log/smartproxy/
+/run/smartproxy-forwarder/
 ```
 
----
-
-# 🔄 Update
+## Removal
 
 ```bash
-cd Smart-Proxy-Server
-git pull
+sudo bash uninstall.sh
 ```
 
-After updating systemd units or installation logic:
+The repository checkout is intentionally preserved.
 
-```bash
-sudo bash install.sh
-```
+## Notes
 
-This keeps the repository checkout and installed system components synchronized.
+This project is optimized for small Debian-based systems such as Orange Pi, Raspberry Pi, thin clients, and small VPS instances.
 
----
+The scanner's ICMP metrics are used for edge discovery. The actual protocol-aware connectivity decision is performed later by `singtest.sh`, and throughput is measured only for the validated set. This keeps the expensive part of the pipeline small.
 
-# 🧪 Manual Testing
-
-Test a single profile:
-
-```bash
-bash lib/health.sh profiles/01_Nova_443.txt
-```
-
-Score a health result:
-
-```bash
-printf 'host=example.com port=443 rtt=40 jitter=2 loss=0 success=100\n' | bash lib/score.sh
-```
-
-Run the complete report and race:
-
-```bash
-bash reload.sh
-```
-
-Validate timer synchronization:
-
-```bash
-bash lib/timer.sh
-```
-
-Run the full diagnostic suite:
-
-```bash
-bash test.sh
-```
-
-Inspect the current state:
-
-```bash
-cat /etc/sing-box/proxy-state.json
-```
-
-Inspect the generated sing-box configuration:
-
-```bash
-cat /etc/sing-box/config.json
-```
-
----
-
-# 🖥 Systemd Services
-
-Main service:
-
-```text
-sing-box.service
-```
-
-Automatic race:
-
-```text
-reload.service
-reload.timer
-```
-
-Useful commands:
-
-```bash
-systemctl status sing-box
-systemctl status reload.service
-systemctl status reload.timer
-```
-
----
-
-# ⚠️ Health vs Real Proxy Performance
-
-The Health Engine intentionally performs lightweight endpoint measurements.
-
-Therefore:
-
-```text
-Endpoint RTT ≠ full proxy RTT
-Endpoint TCP reachability ≠ successful application traffic
-```
-
-A profile can have an excellent endpoint score while its real proxy traffic experiences TLS, transport, routing or application-layer problems.
-
-For deployment validation, test actual SOCKS5 traffic separately.
-
----
-
-# 💡 Why File-Based?
-
-Smart Proxy Server is designed for small systems where simplicity matters.
-
-There is:
-
-- No database
-- No daemonized application framework
-- No telemetry backend
-- No cloud dependency
-
-Profiles are plain text files, state is JSON, and orchestration is Bash + systemd + sing-box.
-
----
-
-# 🖥 Suitable OS
-
-- Debian 12 or 13
-- Ubuntu 24 or 26
-- Armbian
-
-The project is especially suited to:
-
-- Orange Pi
-- Raspberry Pi
-- Mini PCs
-- Thin clients
-- Home servers
-- Debian VPS / dedicated servers
-
----
-
-# 🎯 Designed For
-
-- Home networks
-- LAN proxy gateways
-- Orange Pi
-- Raspberry Pi
-- Small Linux gateways
-- Low-RAM embedded systems
-- Multi-profile VLESS/Trojan environments
-
----
-
-# 🧭 Project Structure
-
-```text
-Smart-Proxy-Server
-│
-├── config/
-│   └── defaults.conf
-│
-├── lib/
-│   ├── common.sh
-│   ├── health.sh
-│   ├── score.sh
-│   ├── hysteresis.sh
-│   ├── generator.sh
-│   ├── race.sh
-│   └── timer.sh
-│
-├── profiles/
-│   ├── 01_Nova_443.txt
-│   ├── 02_Zeus_443.txt
-│   ├── ...
-│   └── 24_BPB_80.txt
-│
-├── systemd/
-│   ├── sing-box.service
-│   ├── reload.service
-│   └── reload.timer
-│
-├── reload.sh
-├── install.sh
-├── uninstall.sh
-└── README.md
-```
-
-### Runtime layout
-
-```text
-/root/Smart-Proxy-Server     ← source + runtime working tree
-/etc/sing-box/               ← installed configuration + state + profiles
-/var/log/smartproxy/         ← logs
-/run/smartproxy/             ← temporary race data
-/etc/systemd/system/         ← systemd units
-```
-
-There is intentionally no second project copy under `/opt`.
-
----
-
-# ❤️ Philosophy
-
-Smart Proxy Server is designed around four principles:
-
-- ⚡ Adaptive performance
-- 🪶 Lightweight operation
-- 🧠 Deterministic decisions
-- 🔐 Privacy first
-
-No telemetry.
-
-No tracking.
-
-No database.
-
-Just profiles, measurements, smart selection and sing-box.
-
----
-
-# 🛣 Roadmap
-
-- [x] File-based proxy profiles
-- [x] Health Engine
-- [x] Score Engine
-- [x] Race Engine
-- [x] Automatic profile selection
-- [x] Manual mode
-- [x] Hysteresis
-- [x] Cooldown
-- [x] JSON state
-- [x] sing-box configuration generation
-- [x] SOCKS5 listener
-- [x] TLS / SNI / ALPN support
-- [x] WebSocket support
-- [x] gRPC support
-- [x] Terminal race report
-- [x] systemd journal report
-- [x] Configuration-driven systemd timer
-- [x] Single repository/runtime tree
-- [ ] Full end-to-end proxy health probing
-- [ ] Historical performance statistics
-- [ ] Web dashboard
-- [ ] Multi-outbound failover groups
-- [ ] OpenWRT integration
-
----
-
-# 🤝 Contributions
-
-Pull requests are welcome.
-
-For bugs, reproducible logs and a minimal test case are highly appreciated.
-
----
-
-# 📜 License
-
-Apache 2.0 License
-
----
-
-<div align="center">
-
-❤️ Built for lightweight, intelligent proxy gateways.
-
-</div>
+No database, telemetry backend, or external control plane is required.
