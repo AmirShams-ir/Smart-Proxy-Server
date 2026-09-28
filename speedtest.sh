@@ -289,9 +289,11 @@ UPLOAD_OK=false
 [[ "$DOWNLOAD_RC" -eq 0 && "$DOWNLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$DOWNLOAD_BYTES_DONE" -gt 0 ]] && DOWNLOAD_OK=true
 [[ "$UPLOAD_RC" -eq 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -eq "$UPLOAD_BYTES" ]] && UPLOAD_OK=true
 
-# A response timeout is only accepted when the entire configured payload was
-# reported by curl as uploaded and the server returned a 2xx/3xx response.
-if [[ "$UPLOAD_RC" -ne 0 && "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -eq "$UPLOAD_BYTES" ]]; then
+# Some HTTP endpoints return a response after accepting the complete upload,
+# while curl can still report a non-zero exit because the response was closed
+# early. The transfer itself is usable for ranking when the full payload was
+# sent and the server supplied a successful/redirect status.
+if [[ "$UPLOAD_HTTP" =~ ^[23][0-9][0-9]$ && "$UPLOAD_BYTES_SENT" -eq "$UPLOAD_BYTES" ]]; then
     UPLOAD_OK=true
 fi
 
