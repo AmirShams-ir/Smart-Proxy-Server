@@ -4,7 +4,7 @@ Description=Automatic Smart Proxy Server Full Rebuild
 [Timer]
 # lib/timer.sh renders OnUnitActiveSec from config/defaults.conf.
 OnBootSec=30s
-OnUnitActiveSec=1h
+OnUnitActiveSec=24h
 AccuracySec=1s
 Persistent=true
 Unit=reload.service
