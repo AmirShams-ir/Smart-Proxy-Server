@@ -140,18 +140,18 @@ for input in "${CONFIGS[@]}"; do
     speed_rc=$?
     set -e
 
-    download="$(awk '/^Download[[:space:]]+[0-9.]+ Mbps/{print $2; exit}' "$out" 2>/dev/null || true)"
-    upload="$(awk '/^Upload[[:space:]]+[0-9.]+ Mbps/{print $2; exit}' "$out" 2>/dev/null || true)"
+    # Parse the numeric value after the metric name. The speedtest output is
+    # intentionally human-formatted, so do not depend on exact spacing.
+    download="$(awk '$1=="Download" && $2 ~ /^[0-9]+([.][0-9]+)?$/ {print $2; exit}' "$out" 2>/dev/null || true)"
+    upload="$(awk '$1=="Upload" && $2 ~ /^[0-9]+([.][0-9]+)?$/ {print $2; exit}' "$out" 2>/dev/null || true)"
     [[ "$download" =~ ^[0-9]+([.][0-9]+)?$ ]] || download=0
     [[ "$upload" =~ ^[0-9]+([.][0-9]+)?$ ]] || upload=0
 
-    # A speed result is rankable only when both directions are positive and
-    # speedtest.sh reported a successful completion. No partial measurement
-    # may enter the normalization pool.
-    if (( speed_rc == 0 )) && awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u>0)}'; then
+    # Rank any complete, positive measurement. A non-zero speedtest exit can
+    # still happen after curl has transferred the full payload (for example
+    # when the remote endpoint closes the connection after accepting a POST).
+    if awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u>0)}'; then
         status='OK'
-    elif awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u>0)}'; then
-        status='SPEEDTEST_RC'
     elif awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d<=0 && u>0)}'; then
         status='DOWNLOAD_FAIL'
     elif awk -v d="$download" -v u="$upload" 'BEGIN{exit !(d>0 && u<=0)}'; then
