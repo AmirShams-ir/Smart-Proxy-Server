@@ -1,228 +1,124 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# When running under systemd, send every line explicitly to the journal.
-# Under an interactive shell this remains normal stdout/stderr.
-if [[ -n "${INVOCATION_ID:-}" ]] && command -v systemd-cat >/dev/null 2>&1; then
-    if [[ -z "${SMARTPROXY_JOURNALIZED:-}" ]]; then
-        export SMARTPROXY_JOURNALIZED=1
-        exec > >(systemd-cat -t smart-proxy-reload -p info) 2> >(systemd-cat -t smart-proxy-reload -p err)
-    fi
-fi
-
-chmod +x lib/health.sh
-chmod +x lib/score.sh
-
-###############################################################################
-# Smart Proxy Server - Reload / Race Report
-###############################################################################
+# Smart Proxy Server - Full Edge-to-Forwarder Orchestrator
+# Pipeline:
+#   scanner.sh -> maker.sh -> validator.sh -> score.sh -> forwarder.sh
+#
+# Normal reloads rebuild the complete proxy pool. No re-installation is needed
+# when Cloudflare worker/edge paths fail.
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${BASE_DIR}/config/defaults.conf"
-source "${BASE_DIR}/lib/common.sh"
-
 LOCK_FILE="/run/smartproxy-reload.lock"
+LOG_DIR="/var/log/smartproxy"
+RUN_DIR="/run/smartproxy"
+PIPE_LOG="$LOG_DIR/rebuild.log"
+
+SCANNER="$BASE_DIR/scanner.sh"
+MAKER="$BASE_DIR/maker.sh"
+VALIDATOR="$BASE_DIR/validator.sh"
+SCORE="$BASE_DIR/score.sh"
+FORWARDER="$BASE_DIR/forwarder.sh"
+
+if [[ -n "${INVOCATION_ID:-}" ]] && command -v systemd-cat >/dev/null 2>&1 && [[ -z "${SMARTPROXY_JOURNALIZED:-}" ]]; then
+    export SMARTPROXY_JOURNALIZED=1
+    exec > >(systemd-cat -t smart-proxy-reload -p info) 2> >(systemd-cat -t smart-proxy-reload -p err)
+fi
+
+fatal(){ printf '[✗] %s\n' "$*" >&2; exit 1; }
+info(){ printf '[*] %s\n' "$*"; }
+warning(){ printf '[!] %s\n' "$*" >&2; }
+success(){ printf '[✓] %s\n' "$*"; }
+
+require_file(){
+    [[ -f "$1" ]] || fatal "Required script not found: $1"
+    [[ -x "$1" ]] || chmod +x "$1"
+}
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+touch "$PIPE_LOG"
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    warning "Another Smart Proxy race is already running. Skipping this run."
+    warning "Another Smart Proxy rebuild is already running. Skipping this run."
     exit 0
 fi
 
-PROFILE_ROOT="$PROFILE_DIR"
-if [[ ! -d "$PROFILE_ROOT" || -z "$(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' -print -quit 2>/dev/null)" ]]; then
-    [[ -d "$BASE_DIR/profiles" ]] && PROFILE_ROOT="$BASE_DIR/profiles"
-fi
-
-shopt -s nullglob
-mapfile -t profiles < <(find "$PROFILE_ROOT" -maxdepth 1 -type f -name '*.txt' | sort)
-shopt -u nullglob
-[[ ${#profiles[@]} -gt 0 ]] || fatal "No proxy profiles found in $PROFILE_ROOT"
-
-RESULT_DIR="/run/smartproxy"
-RESULT_FILE="${RESULT_DIR}/race-results.$$"
-mkdir -p "$RESULT_DIR"
-trap 'rm -f "$RESULT_FILE"' EXIT
-: > "$RESULT_FILE"
-
-###############################################################################
-# Report helpers
-###############################################################################
-
-print_header() {
-    printf '%-24s %-28s %11s %9s %7s %9s %7s\n' \
-        "Profile" "Host" "RTT" "Jitter" "Loss" "Success" "Score"
-    printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
-}
-
-print_row() {
-    local name="$1" host="$2" rtt="$3" jitter="$4" loss="$5" success="$6" score="$7"
-    printf '%-24s %-28s %11s %9s %7s %9s %7s\n' \
-        "$name" "$host" "${rtt}ms" "${jitter}ms" "${loss}%" "${success}%" "$score"
-}
-
-parse_kv() {
-    local input="$1" key="$2"
-    awk -v key="$key" '{
-        for (i = 1; i <= NF; i++) {
-            if (index($i, key "=") == 1) {
-                print substr($i, length(key) + 2)
-                exit
-            }
-        }
-    }' <<< "$input"
-}
-
-is_number() {
-    [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
-}
-
-is_better() {
-    awk -v s="$1" -v bs="$2" \
-        -v suc="$3" -v bsuc="$4" \
-        -v r="$5" -v br="$6" \
-        -v j="$7" -v bj="$8" \
-        -v n="$9" -v bn="${10}" 'BEGIN {
-        if (s != bs) exit !(s > bs)
-        if (suc != bsuc) exit !(suc > bsuc)
-        if (r != br) exit !(r < br)
-        if (j != bj) exit !(j < bj)
-        if (bn == "") exit 0
-        exit !(n < bn)
-    }'
-}
-
-printf '\n'
-info "Testing proxy profiles..."
-printf '\n'
-print_header
-
-best_name=""
-best_score=-1
-best_success=-1
-best_rtt=999999
-best_jitter=999999
-usable=0
-errors=0
-
-for file in "${profiles[@]}"; do
-    name="$(basename "$file" .txt)"
-    health=""
-
-    if ! health="$(${BASE_DIR}/lib/health.sh "$file" 2>&1)"; then
-        print_row "$name" "-" "-" "-" "-" "-" "ERROR"
-        printf '[ERROR] %s: %s\n' "$name" "$health" >&2
-        errors=$((errors + 1))
-        continue
-    fi
-
-    if [[ -z "$health" ]]; then
-        print_row "$name" "-" "-" "-" "-" "-" "ERROR"
-        printf '[ERROR] %s: health.sh returned no metrics\n' "$name" >&2
-        errors=$((errors + 1))
-        continue
-    fi
-
-    scored=""
-    if ! scored="$(printf '%s\n' "$health" | "${BASE_DIR}/lib/score.sh" 2>&1)"; then
-        print_row "$name" "-" "-" "-" "-" "-" "ERROR"
-        printf '[ERROR] %s: score.sh failed: %s\n' "$name" "$scored" >&2
-        errors=$((errors + 1))
-        continue
-    fi
-
-    host="$(parse_kv "$health" host)"
-    port="$(parse_kv "$health" port)"
-    rtt="$(parse_kv "$health" rtt)"
-    jitter="$(parse_kv "$health" jitter)"
-    loss="$(parse_kv "$health" loss)"
-    success_rate="$(parse_kv "$health" success)"
-    score="$(parse_kv "$scored" score)"
-
-    if ! [[ "$score" =~ ^[0-9]+$ ]]; then
-        print_row "$name" "${host:--}" "${rtt:--}" "${jitter:--}" "${loss:--}" "${success_rate:--}" "ERROR"
-        printf '[ERROR] %s: invalid score output: %s\n' "$name" "$scored" >&2
-        errors=$((errors + 1))
-        continue
-    fi
-
-    [[ -n "$host" ]] || host="-"
-    is_number "$rtt" || rtt=999999
-    is_number "$jitter" || jitter=999999
-    is_number "$loss" || loss=100
-    is_number "$success_rate" || success_rate=0
-    [[ "$port" =~ ^[0-9]+$ ]] || port=0
-
-    printf '%s\n' "$name|$host|$port|$rtt|$jitter|$loss|$success_rate|$score" >> "$RESULT_FILE"
-    print_row "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
-    usable=$((usable + 1))
-
-    if is_better "$score" "$best_score" "$success_rate" "$best_success" "$rtt" "$best_rtt" "$jitter" "$best_jitter" "$name" "$best_name"; then
-        best_score="$score"
-        best_name="$name"
-        best_success="$success_rate"
-        best_rtt="$rtt"
-        best_jitter="$jitter"
-    fi
+for script in "$SCANNER" "$MAKER" "$VALIDATOR" "$SCORE" "$FORWARDER"; do
+    require_file "$script"
 done
 
-printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
-(( usable > 0 )) || fatal "No usable proxy profile found. Check: bash -x lib/health.sh <profile-file>"
+TMP_PIPE="$(mktemp -d /tmp/smartproxy-reload.XXXXXX)"
+trap 'rm -rf "$TMP_PIPE"' EXIT INT TERM
+
+run_stage(){
+    local label="$1" script="$2" logfile="$TMP_PIPE/$3"
+    info "[$label] $script"
+    if ! bash "$script" > >(tee "$logfile") 2> >(tee -a "$PIPE_LOG" >&2); then
+        warning "[$label] failed"
+        return 1
+    fi
+    success "[$label] complete"
+}
+
+info "============================================================"
+info "Smart Proxy Server full rebuild"
+info "Pipeline: scanner -> maker -> validator -> score -> forwarder"
+info "============================================================"
+
+# 1. Fresh Cloudflare edge discovery
+run_stage "1/5 Scanner" "$SCANNER" scanner.log || fatal "Scanner failed. Existing Forwarder was left untouched."
+
+EDGE_FILE="$BASE_DIR/cache/edge.csv"
+[[ -s "$EDGE_FILE" ]] || fatal "Scanner produced no edge.csv. Existing Forwarder was left untouched."
+EDGE_COUNT="$(awk 'NR>1 && $1!="" {n++} END{print n+0}' "$EDGE_FILE")"
+(( EDGE_COUNT > 0 )) || fatal "No usable edge IPs found. Existing Forwarder was left untouched."
+info "Scanner produced $EDGE_COUNT edge(s)."
+
+# 2. Candidate generation
+run_stage "2/5 Maker" "$MAKER" maker.log || fatal "Maker failed. Existing Forwarder was left untouched."
+
+GENERATED_DIR="$BASE_DIR/cache/generated"
+GENERATED_COUNT="$(find "$GENERATED_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+(( GENERATED_COUNT > 0 )) || fatal "Maker generated no candidates. Existing Forwarder was left untouched."
+info "Maker produced $GENERATED_COUNT candidate(s)."
+
+# 3. Protocol-aware validation
+run_stage "3/5 Validator" "$VALIDATOR" validator.log || fatal "Validator failed. Existing Forwarder was left untouched."
+
+VALID_CSV="$BASE_DIR/cache/valid.csv"
+VALIDATED_DIR="$BASE_DIR/cache/validated"
+[[ -s "$VALID_CSV" ]] || fatal "Validator produced no valid.csv. Existing Forwarder was left untouched."
+VALIDATED_COUNT="$(find "$VALIDATED_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+(( VALIDATED_COUNT > 0 )) || fatal "No validated profiles survived. Existing Forwarder was left untouched."
+info "Validator kept $VALIDATED_COUNT validated candidate(s)."
+
+# 4. Throughput scoring
+run_stage "4/5 Score" "$SCORE" score.log || fatal "Score failed. Existing Forwarder was left untouched."
+
+WINNER_CSV="$BASE_DIR/cache/winner.csv"
+WINNER_DIR="$BASE_DIR/cache/winner"
+[[ -s "$WINNER_CSV" ]] || fatal "Score produced no winner.csv. Existing Forwarder was left untouched."
+ELIGIBLE_COUNT="$(awk -F',' 'NR>1 && tolower($7)=="yes" {n++} END{print n+0}' "$WINNER_CSV")"
+WINNER_FILES="$(find "$WINNER_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+(( ELIGIBLE_COUNT > 0 && WINNER_FILES > 0 )) || fatal "No eligible winners produced. Existing Forwarder was left untouched."
+info "Score produced $ELIGIBLE_COUNT eligible winner(s)."
+
+# 5. Replace the running Forwarder pool.
+# forwarder.sh stops only its own managed processes, then starts the fresh
+# winners on FORWARDER_BASE_PORT..FORWARDER_BASE_PORT+3.
+run_stage "5/5 Forwarder" "$FORWARDER" forwarder.log || fatal "Forwarder failed to start the new pool."
+
+LISTEN_BASE="${FORWARDER_BASE_PORT:-1080}"
+LISTEN_MAX=$((LISTEN_BASE + ELIGIBLE_COUNT - 1))
 
 printf '\n'
-info "Ranking proxy profiles..."
-printf '\n'
-print_header
-
-sort -t'|' -k8,8nr -k7,7nr -k4,4n -k5,5n -k1,1 "$RESULT_FILE" |
-while IFS='|' read -r name host port rtt jitter loss success_rate score; do
-    print_row "$name" "$host" "$rtt" "$jitter" "$loss" "$success_rate" "$score"
-done
-
-printf '%s\n' '----------------------------------------------------------------------------------------------------------------'
-
-echo
-echo "Winner"
-echo "----------------------------------------------------------------------------------------------------------------"
-printf 'Profile : %s\n' "$best_name"
-printf 'Score   : %s/100\n' "$best_score"
-printf 'RTT     : %sms\n' "$best_rtt"
-printf 'Jitter  : %sms\n' "$best_jitter"
-printf 'Loss    : %s%%\n' "$(awk -F'|' -v n="$best_name" '$1==n {print $6; exit}' "$RESULT_FILE")"
-printf 'Success : %s%%\n' "$best_success"
-echo "----------------------------------------------------------------------------------------------------------------"
-
-info "Applying race decision..."
-if ! RACE_RESULT_FILE="$RESULT_FILE" "${BASE_DIR}/lib/race.sh"; then
-    fatal "Race decision failed."
-fi
-
-active=""
-if [[ -f "$STATE_FILE" ]]; then
-    active="$(python3 - "$STATE_FILE" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[1], encoding='utf-8') as f:
-        print(json.load(f).get('active', ''))
-except Exception:
-    print('')
-PY
-)"
-fi
-
-if [[ -n "$active" ]]; then
-    active_score="$(awk -F'|' -v n="$active" '$1 == n {print $8; exit}' "$RESULT_FILE")"
-    [[ -n "$active_score" ]] || active_score="unknown"
-    echo
-echo "Active Profile"
-printf 'Profile : %s\n' "$active"
-printf 'Score   : %s/100\n' "$active_score"
-fi
-
-if (( errors > 0 )); then
-    warning "${usable} profiles usable, ${errors} profiles failed health/scoring checks."
-fi
-
-echo
-echo "========================================"
-success "Smart Proxy Server race completed successfully."
-echo "========================================"
+info "==================== Rebuild Summary ======================="
+printf 'Scanner edges        : %s\n' "$EDGE_COUNT"
+printf 'Generated candidates : %s\n' "$GENERATED_COUNT"
+printf 'Validated candidates : %s\n' "$VALIDATED_COUNT"
+printf 'Eligible winners     : %s\n' "$ELIGIBLE_COUNT"
+printf 'Winner configs       : %s\n' "$WINNER_FILES"
+printf 'Forwarder ports      : %s-%s\n' "$LISTEN_BASE" "$LISTEN_MAX"
+info "============================================================"
+success "Smart Proxy Server full rebuild completed."
