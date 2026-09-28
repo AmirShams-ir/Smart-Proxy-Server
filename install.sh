@@ -71,6 +71,7 @@ systemctl daemon-reload
 
 chmod +x lib/*.sh
 chmod +x reload.sh test.sh
+chmod +x score.sh speedtest.sh validator.sh maker.sh scanner.sh singtest.sh forwarder.sh
 
 ./lib/timer.sh
 
