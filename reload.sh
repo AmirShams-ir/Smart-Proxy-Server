@@ -71,7 +71,7 @@ run_stage "1/5 Scanner" "$SCANNER" scanner.log || fatal "Scanner failed. Existin
 
 EDGE_FILE="$BASE_DIR/cache/edge.csv"
 [[ -s "$EDGE_FILE" ]] || fatal "Scanner produced no edge.csv. Existing Forwarder was left untouched."
-EDGE_COUNT="$(awk 'NR>1 && $1!="" {n++} END{print n+0}' "$EDGE_FILE")"
+EDGE_COUNT="$(awk -F',' 'NR>1 && $1!="" {n++} END{print n+0}' "$EDGE_FILE")"
 (( EDGE_COUNT > 0 )) || fatal "No usable edge IPs found. Existing Forwarder was left untouched."
 info "Scanner produced $EDGE_COUNT edge(s)."
 
@@ -110,7 +110,7 @@ info "Score produced $ELIGIBLE_COUNT eligible winner(s)."
 run_stage "5/5 Forwarder" "$FORWARDER" forwarder.log || fatal "Forwarder failed to start the new pool."
 
 LISTEN_BASE="${FORWARDER_BASE_PORT:-1080}"
-LISTEN_MAX=$((LISTEN_BASE + ELIGIBLE_COUNT - 1))
+LISTEN_MAX=$((LISTEN_BASE + WINNER_FILES - 1))
 
 printf '\n'
 info "==================== Rebuild Summary ======================="
