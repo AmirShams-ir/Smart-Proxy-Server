@@ -6,7 +6,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 User=root
-ExecStart=/bin/bash %h/Smart-Proxy-Server/reload.sh
+WorkingDirectory=/root/Smart-Proxy-Server
+ExecStart=/bin/bash /root/Smart-Proxy-Server/reload.sh
 TimeoutStartSec=15min
 StandardOutput=journal
 StandardError=journal
