@@ -1,17 +1,15 @@
 [Unit]
-Description=Smart Proxy Reload
-After=network-online.target sing-box.service
+Description=Smart Proxy Server Full Rebuild
 Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/root/Smart-Proxy-Server/reload.sh
 
 [Service]
 Type=oneshot
 User=root
 WorkingDirectory=/root/Smart-Proxy-Server
-
-# Run the repository checkout directly so manual tests and systemd use the
-# exact same script and configuration.
 ExecStart=/bin/bash /root/Smart-Proxy-Server/reload.sh
-
+TimeoutStartSec=15min
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=smart-proxy-reload
